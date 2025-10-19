@@ -15,7 +15,7 @@ class MENSAJES_CP_M(enum.Enum):
     REGISTER_KO = "REGISTER_KO"
     STATUS_E = "STATUS_E"
     STATUS_OK = "STATUS_OK"
-    SUMINISTRAR = "SUMINISTRAR"
+    SUMINISTRAR = "SUMINISTRO_AUTORIZADO"
     PARAR = "PARAR"
     OK_CP = "OK_CP"
     KO_CP = "KO_CP"
@@ -134,7 +134,7 @@ class EV_CP_M:
                     self.enviar_mensaje_socket_transitiva(self.IP_C, self.PUERTO_C, MENSAJES_CP_M.OK_CP.value+f"#{self.ID}") #Notificación de restablecimiento a la central
                 self.connect_engine = True
 
-            elif respuesta == MENSAJES_CP_M.ERROR_COMM.value: #Respuesta de error del engine
+            elif respuesta == MENSAJES_CP_M.ERROR_COMM.value or respuesta == MENSAJES_CP_M.KO_CP.value: #Respuesta de error del engine
                 print(f"Monitor {self.ID} recibió estado ERROR del engine: {respuesta}")
                 print("Notificando a la central del fallo...")
                 self.enviar_mensaje_socket_transitiva(self.IP_C, self.PUERTO_C, MENSAJES_CP_M.KO_CP.value+f"#{self.ID}") #Notificación de fallo a la central
