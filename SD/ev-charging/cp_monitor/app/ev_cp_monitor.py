@@ -5,9 +5,9 @@ import threading               # Importa el módulo 'threading' para ejecutar ta
 import socket                  # Importa el módulo 'socket' para la comunicación en red (ej. conexiones TCP).
 import threading               # Necesario para usar la funcionalidad de hilos
 import enum                    # Necesario para definir enumeraciones
-#from faker import Faker # Importamos la librería Faker
+from faker import Faker        # Importamos la librería Faker
 
-TIMEOUT = 1.5  # Tiempo de espera para las conexiones en segundos
+TIMEOUT = 2  # Tiempo de espera para las conexiones en segundos
 
 class MENSAJES_CP_M(enum.Enum):
     REGISTER_CP = "REGISTER_CP"
@@ -129,12 +129,12 @@ class EV_CP_M:
 
             if respuesta == MENSAJES_CP_M.STATUS_OK.value: #Respuesta exitosa del engine
                 print(f"Monitor {self.ID} recibió estado OK del engine.")
-                if not self.connect_engine: # Si previamente hubo un error, notificar a la central del restablecimiento
-                    print("Notificando a la central del restablecimiento...")
-                    self.enviar_mensaje_socket_transitiva(self.IP_C, self.PUERTO_C, MENSAJES_CP_M.OK_CP.value+f"#{self.ID}") #Notificación de restablecimiento a la central
+                #if not self.connect_engine: # Si previamente hubo un error, notificar a la central del restablecimiento
+                print("Notificando a la central del restablecimiento...")
+                self.enviar_mensaje_socket_transitiva(self.IP_C, self.PUERTO_C, MENSAJES_CP_M.OK_CP.value+f"#{self.ID}") #Notificación de restablecimiento a la central
                 self.connect_engine = True
 
-            elif respuesta == MENSAJES_CP_M.ERROR_COMM.value: #Respuesta de error del engine
+            elif respuesta == MENSAJES_CP_M.ERROR_COMM.value or respuesta == MENSAJES_CP_M.KO_CP: #Respuesta de error del engine
                 print(f"Monitor {self.ID} recibió estado ERROR del engine: {respuesta}")
                 print("Notificando a la central del fallo...")
                 self.enviar_mensaje_socket_transitiva(self.IP_C, self.PUERTO_C, MENSAJES_CP_M.KO_CP.value+f"#{self.ID}") #Notificación de fallo a la central
@@ -153,14 +153,17 @@ class EV_CP_M:
             #print("Conexión exitosa al engine.")
             #self.comprobar_estado()
             print(f"Monitor {self.ID} activo. Iniciando hilos concurrentes.")
- 
+            '''
              # HILO 1: Vigilancia Engine (Health Check y Reportes)
             check_thread = threading.Thread(target=self.comprobar_estado_engine, daemon=True)
             check_thread.start()
-
+            
             # HILO 2: Escucha de Central (Recepción de Comandos)
             listener_thread = threading.Thread(target=self.escuchar_central, daemon=True)
             listener_thread.start()
+            '''
+
+            self.comprobar_estado_engine()
 
             while True:
                 time.sleep(1) 
@@ -175,8 +178,8 @@ if __name__ == "__main__":
         print("Uso: python ev_cp_monitor.py <IP_ENGINE:PUERTO_ENGINE> <IP_CENTRAL:PUERTO_CENTRAL> <ID>")
         sys.exit(1)
     
-    #faker = Faker()
-    monitor = EV_CP_M(sys.argv[1], sys.argv[2], sys.argv[3],"Buenos Aires",100)#faker.city(), float(faker.random_number(digits=2, fix_len=True))/100)
+    faker = Faker()
+    monitor = EV_CP_M(sys.argv[1], sys.argv[2], sys.argv[3],faker.city(), float(faker.random_number(digits=2, fix_len=True))/100)
 
     try:
         monitor.run()
