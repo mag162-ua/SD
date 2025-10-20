@@ -314,7 +314,10 @@ class SocketServer:
         cp.last_heartbeat = datetime.now()
         
         self.central.database.add_charging_point(cp)
+        
         self.central.update_cp_status(cp_id, "DESCONECTADO")
+        
+        self.central.database.save_data()
         
         response = "REGISTER_OK"
         client_socket.send(response.encode('utf-8'))
@@ -980,7 +983,7 @@ def main():
     
     # Configuración
     socket_host = '0.0.0.0'
-    socket_port = 9090
+    socket_port = 5000
     kafka_servers = 'localhost:9092'
     data_file = "ev_central_data.json"
     
