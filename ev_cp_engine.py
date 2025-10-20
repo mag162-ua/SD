@@ -1,21 +1,40 @@
-from kafka import KafkaConsumer, KafkaProducer
 import time
 import sys
-import socket                  # Importa el módulo 'socket' para la comunicación en red (ej. conexiones TCP).
-import threading               # Necesario para usar la funcionalidad de hilos
+import socket                                   # Importa el módulo 'socket' para la comunicación en red (ej. conexiones TCP).
+import threading                                # Necesario para usar la funcionalidad de hilos
+import enum                                     # Necesario para definir enumeraciones
+import json                                     # Necesario para manejar datos en formato JSON
+import os                                       # Necesario para operaciones del sistema (ej. verificar existencia de archivos)
+from kafka import KafkaConsumer, KafkaProducer  # Importamos las librerías de Kafka
+
+class MENSAJES_CP_M(enum.Enum): #ID ocupa 4 caracteres
+    STATUS_E = "STATUS_E" # ST_EN#ID
+    STATUS_OK = "STATUS_OK" #ST_OK#ID
+    STATUS_KO = "STATUS_KO" #ST_KO#ID
+    SUMINISTRAR = "SUMINISTRO_AUTORIZADO" # SU_AU#ID
+    PARAR = "PARAR" # PA_SU#ID
+    ERROR_COMM = "ERROR_COMM" # ER_CO#ID
+    ERROR_KAFKA = "ERROR_KAFKA" # ER_KA#ID
 
 class EV_CP_E:
 
     PUERTO_BASE = 5000 # Atributo statico para el puerto base
+    TOPICO_ESTADO = "engine_status" # Atributo statico para el tópico
+    TOPICO_SUMINISTRO = "engine_suministro" # Atributo statico para el tópico
 
     def __init__(self, IP_PUERTO_BROKER):
         self.ID = None
         self.IP_BROKER, self.PUERTO_BROKER = IP_PUERTO_BROKER.split(':')
         self.IP_E = "0.0.0.0"
         self.PUERTO_E = EV_CP_E.PUERTO_BASE
-        self.suministrar = False
         self.socket_monitor = None
         self.IP_M = None
+        self.estado = MENSAJES_CP_M.STATUS_OK.value
+        self.producer = None
+        self.consumer = None
+        self.suministrar_actvio = False
+        self.parar_suministro = threading.Event()
+        self.total_kwh_suministrados = 0.0
         print(f"Engine inicializado con IP_BROKER: {self.IP_BROKER}, PUERTO_BROKER: {self.PUERTO_BROKER}")
 
     def abrir_socket(self):
@@ -33,7 +52,7 @@ class EV_CP_E:
                 return True
             
             except OSError as e:
-                print(f"Error al abrir el socket: {e}. Reintentando en 5 segundos...")
+                print(f"Error al abrir el socket: {e}. Reintentando...")
                 self.socket_monitor.close()
                 self.PUERTO_E += 1
                 EV_CP_E.PUERTO_BASE += 1
@@ -43,29 +62,151 @@ class EV_CP_E:
                 self.socket_monitor.close()
                 return False
 
-    def escuchar_monitor(self, conexion_monitor):
+    def abrir_kafka(self):
+        print("Abriendo conexión Kafka...")
+        # Aquí iría la lógica para abrir la conexión Kafka.
+        try:
+            self.producer = KafkaProducer(bootstrap_servers=[f"{self.IP_BROKER}:{self.PUERTO_BROKER}"], value_serializer=lambda v: str(v).encode('utf-8'))
+            self.consumer = KafkaConsumer(EV_CP_E.TOPICO_ESTADO, bootstrap_servers=[f"{self.IP_BROKER}:{self.PUERTO_BROKER}"], auto_offset_reset='latest', enable_auto_commit=True, group_id=f'engine_{self.ID}_group', value_deserializer=lambda x: x.decode('utf-8'))
+            print("Conexión Kafka abierta correctamente.")
+            return True
+        
+        except Exception as e:
+            print(f"Error al abrir la conexión Kafka: {e}")
+            if (hasattr(self, 'producer') and self.producer) or (hasattr(self, 'consumer') and self.consumer): 
+                self.producer.close()
+                self.consumer.close()
+            return False
 
-        if conexion_monitor is None:
-            print("Socket de la central no está inicializado.")
-            return 
+    def escuchar_monitor(self):
+        
         while True:
+            conexion_monitor = None
+            try:
+                conexion_monitor, self.IP_M = self.socket_monitor.accept()
+                '''
+                if conexion_monitor is None:
+                    print("Socket de la central no está inicializado.")
+                    return 
+                '''
+                
+                mensaje = conexion_monitor.recv(1024).decode('utf-8').strip()
+                print(f"Mensaje recibido del monitor: {mensaje}")
+                if mensaje:
+                    # Aquí iría la lógica para procesar el mensaje recibido del monitor.
+                    if self.ID is None:
+                        self.ID = mensaje.split('#')[1]  # Asignar ID del monitor
+                        print(f"ID del engine asignado: {self.ID}")
+                        self.cargar_estado()  # Cargar estado previo si existe
+                    if mensaje == MENSAJES_CP_M.STATUS_E.value+f"#{self.ID}":
+                        respuesta = self.estado
+                        conexion_monitor.sendall(respuesta.encode())
+                        print(f"Respuesta enviada al monitor: {respuesta}")
             
-        #try:
-            mensaje = self.socket_monitor.recv(1024).decode('utf-8').strip()
-            print(f"Mensaje recibido del monitor: {mensaje}")
+            except Exception as e:
+                print(f"Error al escuchar el monitor: {e}")
 
+            finally:
+                if conexion_monitor: # Cerrar el socket si se llegó a crear el socket
+                    conexion_monitor.close()
+
+    def escuchar_central(self):
+
+        if self.consumer is None:
+            print("Consumidor Kafka no está inicializado.")
+            return
+
+        print(f"Escuchando mensajes de la central...")
+        # Aquí iría la lógica para escuchar mensajes de la central.
+        #while True:
+        try:
+            for mensaje in self.consumer:
+                mensaje_valor = mensaje.value
+                print(f"Mensaje recibido de la central: {mensaje_valor}")
+                # Aquí iría la lógica para procesar el mensaje recibido de la central.
+                if mensaje_valor == MENSAJES_CP_M.STATUS_KO.value:
+                    self.estado = MENSAJES_CP_M.STATUS_KO.value
+                    print("Estado del engine cambiado a STATUS_KO por la central.")
+                    
+                elif mensaje_valor == MENSAJES_CP_M.SUMINISTRAR.value:
+                    print("Suministro autorizado por la central.")
+
+                    if not self.suministrar_actvio:
+                        print("Iniciando suministro...")
+                        self.suministrar_actvio = True
+                        self.parar_suministro.clear()  # Señal para iniciar el suministro
+                        suministrar_thread = threading.Thread(target=self.suministrar_energia, daemon=True)
+                        suministrar_thread.start()
+
+                elif mensaje_valor == MENSAJES_CP_M.PARAR.value:
+                    if self.suministrar_actvio:
+                        print("Suministro detenido por la central.")
+                        #self.suministrar_actvio = False
+                        self.parar_suministro.set()  # Señal para detener el suministro
+
+        except Exception as e:
+            print(f"Error al escuchar la central: {e}")
+            
+    def suministrar_energia(self):
+        print("Suministro de energía iniciado.")
+        #canidadatos_kwh = 0.0
+        while not self.parar_suministro.is_set():
+            # Lógica para suministrar energía
+            #canidadatos_kwh += 0.1  # Simulación de suministro de energía
+            self.total_kwh_suministrados += 0.1
+            print(f"Suministrando energía... Total kWh suministrados: {self.total_kwh_suministrados:.2f} kWh")
+            self.producer.send(EV_CP_E.TOPICO_SUMINISTRO, f"SUMINISTRO#{self.ID}#{self.total_kwh_suministrados:.2f}")
+            self.producer.flush()
+            self.parar_suministro.wait(1)
+        
+        print("🔌 Hilo de suministro detenido y finalizado limpiamente.")
+        self.suministrar_actvio = False
+        self.total_kwh_suministrados = 0.0
 
     def run(self):
         print("Engine corriendo...")
         # Aquí iría la lógica principal del engine.
-        if self.abrir_socket():
+        if self.abrir_socket() and self.abrir_kafka():
             print("Monitor abierto correctamente.")
+            #conexion_monitor, self.IP_M = self.server_socket.accept()
+
+            listener_thread_m = threading.Thread(target=self.escuchar_monitor, daemon=True)
+            listener_thread_m.start()
+
+            listener_thread_c = threading.Thread(target=self.escuchar_central, daemon=True)
+            listener_thread_c.start()
+
+            menu_thread = threading.Thread(target=self.menu, daemon=True)
+            menu_thread.start()
+
             while True:
-                conexion_monitor, self.IP_M = self.server_socket.accept()
+                time.sleep(1) 
 
-                check_thread = threading.Thread(target=self.escuchar_monitor, daemon=True, args=(con))
-                check_thread.start()
+    def guardar_estado(self):
+        estado_info = {
+            "ID": self.ID,
+            "Total_kWh_Suministrados": self.total_kwh_suministrados
+        }
+        with open(f"estado_engine_{self.ID}.json", "w") as archivo:
+            json.dump(estado_info, archivo, indent=4)
+        print(f"Estado del engine guardado en estado_engine_{self.ID}.json")
 
+    def cargar_estado(self):
+        if os.path.exists(f"estado_engine_{self.ID}.json"):
+            try:
+                with open(f"estado_engine_{self.ID}.json", "r") as archivo:
+                    estado_info = json.load(archivo)
+                    self.total_kwh_suministrados = estado_info.get("Total_kWh_Suministrados", 0.0)
+                    self.parar_suministro.clear()  # Asegurarse de que el suministro no esté detenido al cargar el estado
+                    self.suministrar_actvio = True  # Asegurarse de que el suministro no esté activo al cargar el estado
+                    print(f"Estado del engine cargado: Total kWh suministrados = {self.total_kwh_suministrados} kWh")
+                    suministrar_thread = threading.Thread(target=self.suministrar_energia, daemon=True)
+                    suministrar_thread.start()
+                    os.remove(f"estado_engine_{self.ID}.json")  # Eliminar el archivo después de cargar el estado
+            except Exception as e:
+                print(f"[ERROR RESILIENCIA] Error al cargar el estado: {e}. Iniciando desde 0.")
+                self.total_kwh_suministrados = 0.0
+    
 if __name__ == "__main__":
     if len(sys.argv) != 2:
         print("Uso: python ev_cp_monitor.py <IP_BROKER:PUERTO_BROKER>")
@@ -77,5 +218,10 @@ if __name__ == "__main__":
         engine.run()
     except KeyboardInterrupt:
         print("Engine detenido. Ctrl+C detectado. Saliendo...")
+        if engine.total_kwh_suministrados != 0.0:
+            engine.guardar_estado()
+        engine.producer.close()
+        engine.consumer.close()
+        engine.socket_monitor.close()
         sys.exit(0)
         
