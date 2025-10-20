@@ -578,9 +578,11 @@ class EVCentral:
                 if cp.last_heartbeat:
                     time_diff = (current_time - cp.last_heartbeat).total_seconds()
                     if time_diff > 60:
-                        if cp.status != "DESCONECTADO":
+                        if cp.status != "DESCONECTADO" and cp.status != "PARADO":
                             self.update_cp_status(cp.cp_id, "DESCONECTADO")
                             logger.warning(f"CP {cp.cp_id} desconectado - Sin heartbeat")
+                        elif cp.status == "PARADO":
+                            logger.debug(f"CP {cp.cp_id} está PARADO intencionalmente - Ignorando falta de heartbeat")
     
     def update_cp_status(self, cp_id: str, status: str, consumption: float = 0.0, 
                         amount: float = 0.0, driver_id: str = None):
@@ -657,25 +659,31 @@ class EVCentral:
         cp.driver_id = None
     
     def send_control_command(self, cp_id: str, command: str):
-        """Envía comandos de control a CPs"""
+        """Envía comandos de control a CPs via Kafka"""
         cp = self.database.get_charging_point(cp_id)
         if cp:
+            # ENVIAR COMANDO DIRECTO VIA KAFKA
+            control_message = {
+                'cp_id': cp_id,
+                'command': command,
+                'timestamp': datetime.now().isoformat(),
+                'source': 'central'
+            }
+            
+            self.kafka_manager.send_message('control_commands', control_message)
+            logger.info(f"Comando {command} enviado a CP {cp_id} via Kafka")
+            
+            # Actualizar estado local inmediatamente
             if command == "STOP":
                 self.update_cp_status(cp_id, "PARADO")
                 print(f"Punto de carga {cp_id} parado")
             elif command == "RESUME":
-                self.update_cp_status(cp_id, "ACTIVADO")
+                self.update_cp_status(cp_id, "ACTIVADO") 
                 print(f"Punto de carga {cp_id} reanudado")
-            
-            # Enviar comando por Kafka simulado
-            self.kafka_manager.send_message('control_commands', {
-                'cp_id': cp_id,
-                'command': command,
-                'timestamp': datetime.now().isoformat()
-            })
+                
         else:
             print(f"Punto de carga {cp_id} no encontrado")
-
+            
     def start_kafka_consumer(self):
         """Inicia el consumidor de Kafka en un hilo separado"""
         kafka_thread = threading.Thread(
@@ -713,12 +721,31 @@ class EVCentral:
                     message = msg_data['message']
                     self.process_supply_flow(message)
                 
+                # CONSUMIR RESPUESTAS DE LOS CPs
+                response_messages = self.kafka_manager.get_messages('central_responses')
+                for msg_data in response_messages:
+                    message = msg_data['message']
+                    self.process_central_response(message)
+                
                 time.sleep(2)  # Esperar 2 segundos entre ciclos
                 
             except Exception as e:
                 logger.error(f"Error en consumidor Kafka: {e}")
                 time.sleep(5)
     
+    def process_central_response(self, message: dict):
+        """Procesa respuestas de los CPs a comandos"""
+        try:
+            cp_id = message.get('cp_id')
+            command = message.get('command')
+            status = message.get('status')
+            
+            if status == 'EXECUTED':
+                logger.info(f"CP {cp_id} confirmó ejecución de comando: {command}")
+                
+        except Exception as e:
+            logger.error(f"Error procesando respuesta de CP: {e}")
+
     def process_supply_flow(self, message: dict):
         """Procesa mensajes de caudal de suministro desde el Engine"""
         try:
