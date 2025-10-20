@@ -176,8 +176,8 @@ class EV_CP_E:
             listener_thread_c = threading.Thread(target=self.escuchar_central, daemon=True)
             listener_thread_c.start()
 
-            menu_thread = threading.Thread(target=self.menu, daemon=True)
-            menu_thread.start()
+            #menu_thread = threading.Thread(target=self.menu, daemon=True)
+            #menu_thread.start()
 
             while True:
                 time.sleep(1) 
