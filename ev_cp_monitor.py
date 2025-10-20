@@ -5,7 +5,7 @@ import threading               # Importa el módulo 'threading' para ejecutar ta
 import socket                  # Importa el módulo 'socket' para la comunicación en red (ej. conexiones TCP).
 import threading               # Necesario para usar la funcionalidad de hilos
 import enum                    # Necesario para definir enumeraciones
-from faker import Faker # Importamos la librería Faker
+#from faker import Faker # Importamos la librería Faker
 
 TIMEOUT = 1.5  # Tiempo de espera para las conexiones en segundos
 
@@ -15,7 +15,7 @@ class MENSAJES_CP_M(enum.Enum):
     REGISTER_KO = "REGISTER_KO"
     STATUS_E = "STATUS_E"
     STATUS_OK = "STATUS_OK"
-    SUMINISTRAR = "SUMINISTRO_AUTORIZADO"
+    SUMINISTRAR = "SUMINISTRAR"
     PARAR = "PARAR"
     OK_CP = "OK_CP"
     KO_CP = "KO_CP"
@@ -75,7 +75,7 @@ class EV_CP_M:
         # Aquí iría la lógica para registrarse en la central.
         
         respuesta = self.enviar_mensaje_socket_persistente(self.IP_C, self.PUERTO_C, MENSAJES_CP_M.REGISTER_CP.value+f"#{self.ID}#{self.localizacion}#{self.kwh}")
-
+        print(respuesta)
         if respuesta == MENSAJES_CP_M.REGISTER_OK.value:
             print(f"Monitor {self.ID} registrado exitosamente en la central.")
             return True
@@ -125,7 +125,7 @@ class EV_CP_M:
         # Aquí iría la lógica para comprobar el estado del engine.
 
         while True:
-            respuesta = self.enviar_mensaje_socket_transitiva(self.IP_E, self.PUERTO_E, MENSAJES_CP_M.STATUS_E.value+f"{self.ID}") #Mensaje de estado al engine
+            respuesta = self.enviar_mensaje_socket_transitiva(self.IP_E, self.PUERTO_E, MENSAJES_CP_M.STATUS_E.value+f"#{self.ID}") #Mensaje de estado al engine
 
             if respuesta == MENSAJES_CP_M.STATUS_OK.value: #Respuesta exitosa del engine
                 print(f"Monitor {self.ID} recibió estado OK del engine.")
@@ -134,7 +134,7 @@ class EV_CP_M:
                     self.enviar_mensaje_socket_transitiva(self.IP_C, self.PUERTO_C, MENSAJES_CP_M.OK_CP.value+f"#{self.ID}") #Notificación de restablecimiento a la central
                 self.connect_engine = True
 
-            elif respuesta == MENSAJES_CP_M.ERROR_COMM.value or respuesta == MENSAJES_CP_M.KO_CP.value: #Respuesta de error del engine
+            elif respuesta == MENSAJES_CP_M.ERROR_COMM.value: #Respuesta de error del engine
                 print(f"Monitor {self.ID} recibió estado ERROR del engine: {respuesta}")
                 print("Notificando a la central del fallo...")
                 self.enviar_mensaje_socket_transitiva(self.IP_C, self.PUERTO_C, MENSAJES_CP_M.KO_CP.value+f"#{self.ID}") #Notificación de fallo a la central
@@ -175,8 +175,8 @@ if __name__ == "__main__":
         print("Uso: python ev_cp_monitor.py <IP_ENGINE:PUERTO_ENGINE> <IP_CENTRAL:PUERTO_CENTRAL> <ID>")
         sys.exit(1)
     
-    faker = Faker()
-    monitor = EV_CP_M(sys.argv[1], sys.argv[2], sys.argv[3], faker.city(), float(faker.random_number(digits=2, fix_len=True))/100)
+    #faker = Faker()
+    monitor = EV_CP_M(sys.argv[1], sys.argv[2], sys.argv[3],"Buenos Aires",100)#faker.city(), float(faker.random_number(digits=2, fix_len=True))/100)
 
     try:
         monitor.run()
