@@ -95,6 +95,17 @@ services:
     command: ["tail", "-f", "/dev/null"]
     networks:
       - kafka-network
+    volumes:
+      - ./central_logs:/app/logs           # Logs en host
+      #- ./central_data:/app/data               # Datos en host  
+      - ./central_backups:/app/backups     # Backups en host
+    environment:
+      - SOCKET_HOST=0.0.0.0
+      - SOCKET_PORT=5000
+      - KAFKA_SERVERS=localhost:9092
+      - LOG_DIR=/app/logs
+      - DATA_FILE=/app/ev_central_data.json
+      - BACKUP_DIR=/app/backups
 
 networks:
   kafka-network:
