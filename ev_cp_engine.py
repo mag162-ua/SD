@@ -12,8 +12,10 @@ class MENSAJES_CP_M(enum.Enum): #ID ocupa 4 caracteres
     STATUS_E = "STATUS_E" # ST_EN#ID
     STATUS_OK = "STATUS_OK" #ST_OK#ID
     STATUS_KO = "STATUS_KO" #ST_KO#ID
+    SOL_SUMINISTRO = 'SUPPLY_APPROVE'
     SUMINISTRAR = "supply_response" # SU_AU#ID
     SUMINISTRANDO = "supply_flow" # SU_IN#ID#ANONIMO#KWH#TIMESTAMP
+    SOL_PARAR = 'STOP'
     PARAR = "stop_response" # ST_OP#ID
     ERROR_COMM = "ERROR_COMM" # ER_CO#ID
     ERROR_KAFKA = "ERROR_KAFKA" # ER_KA#ID
@@ -22,8 +24,8 @@ class MENSAJES_CP_M(enum.Enum): #ID ocupa 4 caracteres
 class EV_CP_E:
 
     PUERTO_BASE = 5000 # Atributo statico para el puerto base
-    TOPICO_ESTADO = "engine_status" # Atributo statico para el tópico
-    TOPICO_SUMINISTRO = "engine_suministro" # Atributo statico para el tópico
+    TOPICO_ACCION = "supply_flow" # Atributo statico para el tópico
+    TOPICO_SUMINISTRO = "supply_response" # Atributo statico para el tópico
 
     def __init__(self, IP_PUERTO_BROKER):
         self.ID = None
@@ -70,7 +72,7 @@ class EV_CP_E:
         # Aquí iría la lógica para abrir la conexión Kafka.
         try:
             self.producer = KafkaProducer(bootstrap_servers=[f"{self.IP_BROKER}:{self.PUERTO_BROKER}"], value_serializer=lambda v: str(v).encode('utf-8'))
-            self.consumer = KafkaConsumer(EV_CP_E.TOPICO_ESTADO, bootstrap_servers=[f"{self.IP_BROKER}:{self.PUERTO_BROKER}"], auto_offset_reset='latest', enable_auto_commit=True, group_id=f'engine_{self.ID}_group', value_deserializer=lambda x: x.decode('utf-8'))
+            self.consumer = KafkaConsumer(EV_CP_E.TOPICO_ACCION, bootstrap_servers=[f"{self.IP_BROKER}:{self.PUERTO_BROKER}"], auto_offset_reset='latest', enable_auto_commit=True, group_id=f'engine_{self.ID}_group', value_deserializer=lambda x: x.decode('utf-8'))
             print("Conexión Kafka abierta correctamente.")
             return True
         
@@ -124,39 +126,47 @@ class EV_CP_E:
         #while True:
         try:
             for mensaje in self.consumer:
-                mensaje_valor = mensaje.value
+                #mensaje_valor = mensaje.value
+                mensaje_valor = json.loads(mensaje.value)
                 print(f"Mensaje recibido de la central: {mensaje_valor}")
                 # Aquí iría la lógica para procesar el mensaje recibido de la central.
+                cp_id = mensaje_valor.get('cp_id')
+                type = mensaje_valor.get('type')
+                #if mensaje_valor == MENSAJES_CP_M.SUMINISTRAR.value+f"#{self.ID}":
+                if cp_id == self.ID:
+                    if type == MENSAJES_CP_M.SOL_SUMINISTRO.value:
+                        print("Suministro autorizado por la central.")
 
-                if mensaje_valor == MENSAJES_CP_M.SUMINISTRAR.value+f"#{self.ID}":
-                    print("Suministro autorizado por la central.")
+                        if not self.suministrar_actvio:
+                            print("Iniciando suministro...")
+                            self.suministrar_actvio = True
+                            self.parar_suministro.clear()  # Señal para iniciar el suministro
+                            suministrar_thread = threading.Thread(target=self.suministrar_energia, daemon=True)
+                            respuesta =  {'cp_id': self.ID, 'approve': True, 'reason': 'Suministro iniciado'}
+                            self.producer.send(EV_CP_E.TOPICO_SUMINISTRO, json.dumps(respuesta))
+                            self.producer.flush()
+                            suministrar_thread.start()
+                        else:
+                            print("El suministro ya está activo.")
+                            #self.producer.send(EV_CP_E.TOPICO_SUMINISTRO, MENSAJES_CP_M.SUMINISTRAR.value+f"#{self.ID}#{False}")
+                            respuesta =  {'cp_id': self.ID, 'approve': False, 'reason': 'Suministro ya iniciado'}
+                            self.producer.send(EV_CP_E.TOPICO_SUMINISTRO, json.dumps(respuesta))
+                            self.producer.flush()
 
-                    if not self.suministrar_actvio:
-                        print("Iniciando suministro...")
-                        self.suministrar_actvio = True
-                        self.parar_suministro.clear()  # Señal para iniciar el suministro
-                        suministrar_thread = threading.Thread(target=self.suministrar_energia, daemon=True)
-                        self.producer.send(EV_CP_E.TOPICO_SUMINISTRO, "{'reason':"+MENSAJES_CP_M.SUMINISTRAR.value+f", 'cp_id':{self.ID}, 'approve':{True}"+"}")
-                        self.producer.flush()
-                        suministrar_thread.start()
-                    else:
-                        print("El suministro ya está activo.")
-                        #self.producer.send(EV_CP_E.TOPICO_SUMINISTRO, MENSAJES_CP_M.SUMINISTRAR.value+f"#{self.ID}#{False}")
-                        self.producer.send(EV_CP_E.TOPICO_SUMINISTRO, "{'reason':"+MENSAJES_CP_M.SUMINISTRAR.value+f", 'cp_id':{self.ID}, 'approve':{False}"+"}")
-                        self.producer.flush()
-
-                elif mensaje_valor == MENSAJES_CP_M.PARAR.value+f"#{self.ID}":
-                    if self.suministrar_actvio:
-                        print("Suministro detenido por la central.")
-                        #self.producer.send(EV_CP_E.TOPICO_SUMINISTRO, MENSAJES_CP_M.PARAR.value+f"#{self.ID}#YA_PARADO")
-                        self.producer.send(EV_CP_E.TOPICO_SUMINISTRO, "{'reason':"+MENSAJES_CP_M.PARAR.value+f", 'cp_id':{self.ID}, 'approve':{True}"+"}")
-                        self.producer.flush()
-                        self.parar_suministro.set()  # Señal para detener el suministro
-                    else:
-                        print("El suministro ya está detenido.")
-                        #self.producer.send(EV_CP_E.TOPICO_SUMINISTRO, MENSAJES_CP_M.PARAR.value+f"#{self.ID}#YA_PARADO")
-                        self.producer.send(EV_CP_E.TOPICO_SUMINISTRO, "{'reason':"+MENSAJES_CP_M.PARAR.value+f", 'cp_id':{self.ID}, 'approve':{False}"+"}")
-                        self.producer.flush()
+                    elif type == MENSAJES_CP_M.SOL_PARAR.value:
+                        if self.suministrar_actvio:
+                            print("Suministro detenido por la central.")
+                            #self.producer.send(EV_CP_E.TOPICO_SUMINISTRO, MENSAJES_CP_M.PARAR.value+f"#{self.ID}#YA_PARADO")
+                            respuesta = {'cp_id': self.ID, 'approve': True, 'reason': 'Parado'}  # importante: reason 'stop' para que central lo procese correctamente
+                            self.producer.send(EV_CP_E.TOPICO_SUMINISTRO, json.dumps(respuesta))
+                            self.producer.flush()
+                            self.parar_suministro.set()  # Señal para detener el suministro
+                        else:
+                            print("El suministro ya está detenido.")
+                            #self.producer.send(EV_CP_E.TOPICO_SUMINISTRO, MENSAJES_CP_M.PARAR.value+f"#{self.ID}#YA_PARADO")
+                            respuesta = {'cp_id': self.ID, 'approve': True, 'reason': 'Ya parado'}  # importante: reason 'stop' para que central lo procese correctamente
+                            self.producer.send(EV_CP_E.TOPICO_SUMINISTRO, json.dumps(respuesta))
+                            self.producer.flush()
 
         except Exception as e:
             print(f"Error al escuchar la central: {e}")
