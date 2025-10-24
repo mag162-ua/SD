@@ -419,7 +419,7 @@ class SocketServer:
                 self.handle_cp_registration(parts[1:], client_socket)
             elif message.startswith('CP_OK'):
                 parts = message.split('#')
-                self.handle_cp_ok(parts[1:])
+                self.handle_cp_ok(parts[1:],client_socket)
             elif message.startswith('CP_KO'):
                 parts = message.split('#')
                 self.handle_cp_failure(parts[1:], client_socket)
@@ -464,22 +464,37 @@ class SocketServer:
             client_socket.send(response.encode('utf-8'))
             logger.error(f"❌ Error inesperado registrando CP {cp_id}")
     
-    def handle_cp_ok(self, params: List[str]):
-        """Maneja ok de puntos de carga"""
-        if params:
-            cp_id = params[0]
-            cp = self.central.database.get_charging_point(cp_id)
-            if cp:
-                cp.last_heartbeat = datetime.now()
-                if cp.status == "DESCONECTADO":
-                    self.central.update_cp_status(cp_id, "ACTIVADO")
-                    logger.info(f"🔄 CP {cp_id} reactivado - Estado cambiado a ACTIVADO")
-                elif cp.status == "AVERIADO":
-                    self.central.update_cp_status(cp_id, "ACTIVADO")
-                    logger.info(f"🔄 CP {cp_id} reactivado - Estado anterior AVERIADO cambiado a ACTIVADO")
-                
-                logger.debug(f"💓 Heartbeat recibido de {cp_id}")
+def handle_cp_ok(self, params: List[str], client_socket):
+    """Maneja ok de puntos de carga y envía confirmación"""
+    if params:
+        cp_id = params[0]
+        cp = self.central.database.get_charging_point(cp_id)
+        if cp:
+            cp.last_heartbeat = datetime.now()
+        
+            status_changed = False
+            if cp.status == "DESCONECTADO":
+                self.central.update_cp_status(cp_id, "ACTIVADO")
+                logger.info(f"🔄 CP {cp_id} reactivado - Estado cambiado a ACTIVADO")
+                status_changed = True
+            elif cp.status == "AVERIADO":
+                self.central.update_cp_status(cp_id, "ACTIVADO")
+                logger.info(f"🔄 CP {cp_id} reactivado - Estado anterior AVERIADO cambiado a ACTIVADO")
+                status_changed = True
             
+            response = f"CP_OK_ACK#{cp_id}"
+            if status_changed:
+                response += "#ESTADO_ACTUALIZADO"
+            
+            client_socket.send(response.encode('utf-8'))
+            logger.debug(f"💓 Heartbeat recibido de {cp_id} - Confirmación enviada")
+            
+        else:
+            # CP no encontrado - enviar error
+            response = f"ERROR#CP_no_encontrado#{cp_id}"
+            client_socket.send(response.encode('utf-8'))
+            logger.error(f"❌ CP {cp_id} no encontrado para mensaje CP_OK")
+
     def handle_cp_failure(self, params: List[str], client_socket):
         """Maneja mensajes de avería CP_KO"""
         if not params:
@@ -504,6 +519,14 @@ class SocketServer:
             
             response = f"CP_KO_ACK#{cp_id}"
             client_socket.send(response.encode('utf-8'))
+
+            """
+            failure_message = {
+                
+            }
+
+            self.kafka_manager.send_message('d', failure_message)
+            """
             
             logger.info(f"🔴 CP {cp_id} puesto en estado AVERIADO")
         else:
@@ -762,10 +785,13 @@ class EVCentral:
         
         self.database.add_transaction(transaction)
         logger.info(f"❌ Transacción fallida registrada: {transaction['transaction_id']} - Razón: {failure_reason}")
-        
-        cp.current_consumption = 0.0
-        cp.current_amount = 0.0
-        cp.driver_id = None
+        self.update_cp_status(
+            cp_id=cp.cp_id,
+            status="AVERIADO",
+            consumption=0.0,
+            amount=0.0,
+            driver_id=None
+        )
     
     def send_control_command(self, cp_id: str, command: str):
         """Envía comandos de control a CPs via Kafka"""
@@ -830,38 +856,55 @@ class EVCentral:
                 logger.error(f"❌ Error en consumidor Kafka: {e}", exc_info=True)
                 time.sleep(5)
 
-    def supply_response(self, message: dict):
-        """Procesa mensajes de suministro desde el Engine"""
-        try:
+def process_supply_response(self, message: dict):
+    """Procesa respuestas de suministro desde el Engine"""
+    try:
+        cp_id = message.get('cp_id')
+        approve = message.get('approve', False)
+        reason = message.get('reason', 'No especificado')
+        
+        if not cp_id:
+            logger.error("❌ Mensaje de suministro sin CP_ID")
+            return
 
-            cp_id = message.get('cp_id')
-            approve = message.get('approve', False)
-            reason = message.get('reason', 'No especificado')
+        cp = self.database.get_charging_point(cp_id)
+        if not cp:
+            logger.error(f"❌ CP {cp_id} no encontrado para mensaje de suministro")
+            return
 
-            cp = self.database.get_charging_point(cp_id)
-
-            if approve:
-                self.update_cp_status(cp_id, "SUMINISTRANDO")
-                logger.info(f":white_check_mark: Suministro aprobado para CP {cp_id}")
-                return
+        if approve:
+            # Suministro aprobado - iniciar carga
+            self.update_cp_status(
+                cp_id=cp_id,
+                status="SUMINISTRANDO",
+                driver_id=cp.driver_id  # Mantener el driver_id actual
+            )
             
-            logger.warning(f":warning: No suministro reportado por CP {cp_id}: {reason}")
+            # Enviar confirmación al Engine
+            approval_message = {
+                'cp_id': cp_id,
+                'driver_id': cp.driver_id,
+                'type': 'SUPPLY_APPROVED',
+                'timestamp': datetime.now().isoformat(),
+                'message': 'Suministro iniciado correctamente'
+            }
+            
+            self.kafka_manager.send_message('supply_flow', approval_message)
+            logger.info(f"✅ Suministro aprobado para CP {cp_id} - Conductor: {cp.driver_id}")
+            
+        else:
+            # Suministro rechazado o detenido
             
             if reason.lower() == "stop" and cp.status == "SUMINISTRANDO":
+                # Parada normal del suministro
                 self.update_cp_status(cp_id, "ACTIVADO")
-                #ticket
-                logger.info(f"🟢: Suministro finalizado para CP {cp_id}")
-                return
-            
-            if cp and cp.status == "SUMINISTRANDO":
-                driver_id = cp.driver_id
-                self.update_cp_status(cp_id, "PARADO")
-                self.record_failed_transaction(cp, reason, driver_id)
-                logger.info(f":electric_plug: Suministro interrumpido para conductor {driver_id} - CP {cp_id} parado")
+                logger.info(f"🟢 Suministro finalizado para CP {cp_id}")
+            else:
+                # Rechazo antes de iniciar suministro
+                logger.info(f"❌ Suministro rechazado para CP {cp_id} - Estado actual: {cp.status} - Razón: {reason}")
                 
-        except Exception as e:
-            logger.error(f":x: Error procesando mensaje de no suministro: {e}", exc_info=True)
-
+    except Exception as e:
+        logger.error(f"❌ Error procesando respuesta de suministro: {e}", exc_info=True)
     def process_supply_flow(self, message: dict):
         """Procesa mensajes de caudal de suministro desde el Engine"""
         try:
