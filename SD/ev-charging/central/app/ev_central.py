@@ -613,13 +613,14 @@ class EVCentral:
         panel_thread.start()
     
     def display_status(self):
-        """Muestra el estado actual del sistema"""
+        """Muestra el estado actual del sistema con información detallada de suministro"""
         os.system('cls' if os.name == 'nt' else 'clear')
-        print("\n" + "="*80)
+        print("\n" + "="*110)
         print("EV_Central - Estado del Sistema")
-        print("="*80)
-        print(f"{'ID':<10} {'Ubicación':<20} {'Estado':<15} {'Caudal':<10} {'Importe':<10} {'Conductor'}")
-        print("-"*80)
+        print("="*110)
+        
+        print(f"{'ID':<8} {'Ubicación':<18} {'Estado':<14} {'Energía':<10} {'Precio':<8} {'Importe':<10} {'Conductor':<12} {'Detalles'}")
+        print("-"*110)
         
         for cp in self.database.charging_points.values():
             status_icon = {
@@ -630,17 +631,37 @@ class EVCentral:
                 "DESCONECTADO": "⚫ DESCONECTADO"
             }.get(cp.status, "⚫ DESCONECTADO")
             
-            if cp.status == "SUMINISTRANDO" and cp.current_consumption > 0:
-                caudal = f"{cp.current_consumption:.1f}kW"
-            else:
-                caudal = "-"
-                
-            importe = f"€{cp.current_amount:.2f}" if cp.current_amount > 0 else "-"
+            precio = f"€{cp.price_per_kwh:.2f}"
             conductor = cp.driver_id if cp.driver_id else "-"
             
-            print(f"{cp.cp_id:<10} {cp.location:<20} {status_icon:<15} {caudal:<10} {importe:<10} {conductor}")
+            if cp.status == "SUMINISTRANDO" and cp.total_energy_supplied > 0:
+                # ⭐⭐ INFORMACIÓN DETALLADA PARA CPs SUMINISTRANDO
+                energia = f"{cp.total_energy_supplied:.1f}kWh"
+                importe_actual = f"€{cp.current_amount:.2f}"
+                importe_total = f"€{cp.total_revenue:.2f}"
+                caudal = f"{cp.current_consumption:.1f}kW" if cp.current_consumption > 0 else "0.0kW"
+                
+                detalles = f"Caudal: {caudal} | Sesión: {importe_actual}"
+                
+                print(f"{cp.cp_id:<8} {cp.location:<18} {status_icon:<14} {energia:<10} {precio:<8} {importe_total:<10} {conductor:<12} {detalles}")
+                
+            else:
+                # Información básica para otros estados
+                energia = f"{cp.total_energy_supplied:.1f}kWh" if cp.total_energy_supplied > 0 else "0.0kWh"
+                importe_total = f"€{cp.total_revenue:.2f}" if cp.total_revenue > 0 else "€0.00"
+                
+                if cp.status == "ACTIVADO":
+                    detalles = "🟢 Listo para cargar"
+                elif cp.status == "PARADO":
+                    detalles = "🟠 Parado manualmente"
+                elif cp.status == "AVERIADO":
+                    detalles = "🔴 En avería"
+                else:
+                    detalles = "⚫ Desconectado"
+                
+                print(f"{cp.cp_id:<8} {cp.location:<18} {status_icon:<14} {energia:<10} {precio:<8} {importe_total:<10} {conductor:<12} {detalles}")
         
-        print("="*80)
+        print("="*110)
         print("Comandos disponibles:")
         print("  stop <cp_id>    - Parar un punto de carga")
         print("  resume <cp_id>  - Reanudar un punto de carga")  
@@ -649,8 +670,8 @@ class EVCentral:
         print("  save           - Guardar datos manualmente")
         print("  backup         - Crear copia de seguridad")
         print("  quit           - Salir")
-        print("="*80)
-    
+        print("="*110)
+
     def handle_console_input(self):
         """Maneja la entrada por consola"""
         while self.running:
@@ -912,42 +933,63 @@ def process_supply_response(self, message: dict):
                 
     except Exception as e:
         logger.error(f"❌ Error procesando respuesta de suministro: {e}", exc_info=True)
-    def process_supply_flow(self, message: dict):
+        
+   def process_supply_flow(self, message: dict):
         """Procesa mensajes de caudal de suministro desde el Engine"""
         try:
             cp_id = message.get('cp_id')
-            driver_id = message.get('driver_id')
-            flow_rate = message.get('flow_rate')
-            energy_delivered = message.get('energy_delivered')
-            current_amount = message.get('current_amount')
+            driver_id = message.get('driver_id', 'ANONIMO')
+            kwh = message.get('kwh', 0.0)  # kWh totales suministrados
             timestamp = message.get('timestamp')
+            reason = message.get('reason', '')
             
-            if not cp_id or flow_rate is None:
-                logger.error("❌ Parámetros insuficientes en mensaje de caudal")
+            if not cp_id:
+                logger.error("❌ Parámetros insuficientes en mensaje de suministro")
                 return
             
+            # Calcular el caudal actual (kW) basado en el incremento de kWh
+            cp = self.database.get_charging_point(cp_id)
+            current_flow_rate = 0.0
+            
+            if cp and cp.total_energy_supplied > 0:
+                # Estimación del caudal basada en el incremento de energía
+                # (esto es una aproximación, idealmente el Engine debería enviar el caudal)
+                energy_increment = kwh - cp.total_energy_supplied
+                current_flow_rate = max(0.0, energy_increment * 3600)  # Convertir kWh/s a kW
+            
+            # Calcular importe actual basado en el precio del CP
+            current_amount = 0.0
+            if cp:
+                current_amount = kwh * cp.price_per_kwh
+            
+            # Actualizar el estado del CP
             self.update_cp_status(
                 cp_id=cp_id,
                 status="SUMINISTRANDO",
-                consumption=flow_rate,
+                consumption=current_flow_rate,
                 amount=current_amount,
                 driver_id=driver_id
             )
             
-            logger.debug(f"⚡ Caudal actualizado - CP: {cp_id}, Flujo: {flow_rate} kW, Importe: €{current_amount:.2f}")
+            # Actualizar estadísticas acumuladas
+            if cp:
+                cp.total_energy_supplied = kwh
+                cp.total_revenue = current_amount
             
-            if driver_id:
+            logger.debug(f"⚡ Suministro actualizado - CP: {cp_id}, Energía: {kwh:.2f}kWh, Caudal: {current_flow_rate:.1f}kW, Importe: €{current_amount:.2f}")
+            
+            if driver_id and driver_id != 'ANONIMO':
                 self.send_flow_update_to_driver(
                     driver_id=driver_id,
                     cp_id=cp_id,
-                    flow_rate=flow_rate,
-                    energy_delivered=energy_delivered,
+                    flow_rate=current_flow_rate,
+                    energy_delivered=kwh,
                     current_amount=current_amount,
                     timestamp=timestamp
                 )
                 
         except Exception as e:
-            logger.error(f"❌ Error procesando mensaje de caudal: {e}", exc_info=True)
+            logger.error(f"❌ Error procesando mensaje de suministro: {e}", exc_info=True)
 
     def send_flow_update_to_driver(self, driver_id: str, cp_id: str, flow_rate: float, 
                                   energy_delivered: float, current_amount: float, timestamp: str = None):
