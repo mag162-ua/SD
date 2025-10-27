@@ -1,6 +1,6 @@
 TITLE EJE_DOCKER
 
-docker compose up -d zookeeper Kafka
+docker compose up -d zookeeper kafka
 docker ps
 docker compose run kafka-init
 docker compose up -d central driver cp_engine cp_monitor --force-recreate
@@ -11,3 +11,4 @@ ECHO Iniciando servicios de Kafka y Docker Compose...
 ECHO ===========================================
 
 CMD /k
+
