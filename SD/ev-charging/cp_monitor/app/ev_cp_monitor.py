@@ -7,7 +7,7 @@ import threading               # Necesario para usar la funcionalidad de hilos
 import enum                    # Necesario para definir enumeraciones
 from faker import Faker        # Importamos la librería Faker
 
-TIMEOUT = 2  # Tiempo de espera para las conexiones en segundos
+TIMEOUT = 1  # Tiempo de espera para las conexiones en segundos
 
 class MENSAJES_CP_M(enum.Enum):
     REGISTER_CP = "REGISTER_CP"
@@ -15,6 +15,7 @@ class MENSAJES_CP_M(enum.Enum):
     REGISTER_KO = "REGISTER_KO"
     STATUS_E = "STATUS_E"
     STATUS_OK = "STATUS_OK"
+    STATUS_KO = "STATUS_KO"
     SUMINISTRAR = "SUMINISTRAR"
     PARAR = "PARAR"
     OK_CP = "CP_OK"
@@ -33,7 +34,7 @@ class EV_CP_M:
         print(f"Monitor {self.ID} inicializado con IP_PUERTO_E: {IP_PUERTO_E}, IP_PUERTO_C: {IP_PUERTO_C}")
 
     def enviar_mensaje_socket_transitiva(self, IP, PUERTO,mensaje):
-        print(f"Enviando mensaje a la central: {mensaje}")
+        print(f"Enviando mensaje transitiva a {IP}:{PUERTO} : {mensaje}")
         try:
             socket_t = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             socket_t.settimeout(TIMEOUT)
@@ -41,6 +42,8 @@ class EV_CP_M:
             socket_t.sendall(mensaje.encode())
 
             respuesta = socket_t.recv(1024).decode('utf-8').strip()
+            if not respuesta:
+                raise Exception("No hubo respuesta / conexión finalizada")
             return respuesta
         
         except Exception as e:
@@ -51,7 +54,7 @@ class EV_CP_M:
             socket_t.close()
     
     def enviar_mensaje_socket_persistente(self, IP, PUERTO,mensaje):
-        print(f"Enviando mensaje persistente a la central: {mensaje}")
+        print(f"Enviando mensaje persistente a {IP}:{PUERTO} : {mensaje}")
         try:
             if self.socket_central is None:
                 self.socket_central = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -83,7 +86,7 @@ class EV_CP_M:
         elif respuesta == "ERROR_COMM" or respuesta == MENSAJES_CP_M.REGISTER_KO.value:
             print(f"Error al registrar el monitor {self.ID} en la central: {respuesta}")
             return False
-        
+    '''  
     def escuchar_central(self):
         print(f"Escuchando mensajes de la central en {self.IP_C}:{self.PUERTO_C}...")
         # Aquí iría la lógica para escuchar mensajes de la central.
@@ -116,7 +119,7 @@ class EV_CP_M:
             except Exception as e:
                 print(f"Error al recibir mensaje de la central: {e}")
                 break
-            
+    '''     
     ### DUDA A VER : MONITOR ENVIA RESPUESTA A CENTRAL TRAS RECIBIR SUMINISTRAR/PARAR?
     def comprobar_estado_engine(self):
         #IP_E , PUERTO_E = self.IP_PUERTO_E.split(':')
@@ -126,7 +129,7 @@ class EV_CP_M:
 
         while True:
             respuesta = self.enviar_mensaje_socket_transitiva(self.IP_E, self.PUERTO_E, MENSAJES_CP_M.STATUS_E.value+f"#{self.ID}") #Mensaje de estado al engine
-
+            print(f"RESPUESTA DEL ENGINE = {respuesta}")
             if respuesta == MENSAJES_CP_M.STATUS_OK.value: #Respuesta exitosa del engine
                 print(f"Monitor {self.ID} recibió estado OK del engine.")
                 #if not self.connect_engine: # Si previamente hubo un error, notificar a la central del restablecimiento
@@ -134,7 +137,7 @@ class EV_CP_M:
                 self.enviar_mensaje_socket_transitiva(self.IP_C, self.PUERTO_C, MENSAJES_CP_M.OK_CP.value+f"#{self.ID}") #Notificación de restablecimiento a la central
                 self.connect_engine = True
 
-            elif respuesta == MENSAJES_CP_M.ERROR_COMM.value or respuesta == MENSAJES_CP_M.KO_CP: #Respuesta de error del engine
+            elif respuesta == MENSAJES_CP_M.ERROR_COMM.value or respuesta == MENSAJES_CP_M.STATUS_KO.value: #Respuesta de error del engine
                 print(f"Monitor {self.ID} recibió estado ERROR del engine: {respuesta}")
                 print("Notificando a la central del fallo...")
                 self.enviar_mensaje_socket_transitiva(self.IP_C, self.PUERTO_C, MENSAJES_CP_M.KO_CP.value+f"#{self.ID}") #Notificación de fallo a la central
@@ -179,7 +182,7 @@ if __name__ == "__main__":
         sys.exit(1)
     
     faker = Faker()
-    monitor = EV_CP_M(sys.argv[1], sys.argv[2], sys.argv[3],faker.city(), float(faker.random_number(digits=2, fix_len=True))/100)
+    monitor = EV_CP_M(sys.argv[1], sys.argv[2], sys.argv[3], faker.city(), float(faker.random_number(digits=2, fix_len=True))/100)
 
     try:
         monitor.run()
