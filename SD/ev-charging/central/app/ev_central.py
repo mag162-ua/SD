@@ -319,47 +319,108 @@ class DatabaseManager:
             logger.error(f"❌ Error creando copia de seguridad: {e}", exc_info=True)
             return False
 
-class SimpleKafkaManager:
-    """Simulador de Kafka para desarrollo"""
+import json
+from kafka import KafkaProducer, KafkaConsumer
+from kafka.errors import KafkaError
+
+class RealKafkaManager:
+    """Gestor de Kafka real para producción"""
     
     def __init__(self, bootstrap_servers: str):
         self.bootstrap_servers = bootstrap_servers
-        self.topics = {
-            'driver_requests': [],
-            'driver_responses': [],
-            'central_updates': [],
-            'control_commands': [],
-            'supply_flow': [],
-        }
-        logger.info(f"🔌 Kafka simulado en {bootstrap_servers}")
+        self.producer = None
+        self.consumers = {}
+        
+        try:
+            # Inicializar producer
+            self.producer = KafkaProducer(
+                bootstrap_servers=[self.bootstrap_servers],
+                value_serializer=lambda v: json.dumps(v).encode('utf-8'),
+                retries=3,
+                acks='all'
+            )
+            
+            logger.info(f"🔌 Kafka REAL conectado en {bootstrap_servers}")
+            
+        except Exception as e:
+            logger.error(f"❌ Error conectando a Kafka: {e}")
+            raise
     
     def send_message(self, topic: str, message: dict):
-        """Envía mensaje a topic simulado"""
-        if topic in self.topics:
-            self.topics[topic].append({
-                'timestamp': datetime.now(),
-                'message': message
-            })
-            logger.debug(f"📤 Mensaje simulado enviado a {topic}: {message}")
-        else:
-            logger.warning(f"⚠️ Topic {topic} no existe")
+        """Envía mensaje a topic real de Kafka"""
+        try:
+            if self.producer:
+                future = self.producer.send(topic, message)
+                # Opcional: esperar confirmación
+                # future.get(timeout=10)
+                self.producer.flush()
+                logger.debug(f"📤 Mensaje REAL enviado a {topic}: {message}")
+            else:
+                logger.error("❌ Producer de Kafka no inicializado")
+                
+        except KafkaError as e:
+            logger.error(f"❌ Error enviando mensaje a Kafka: {e}")
+        except Exception as e:
+            logger.error(f"❌ Error inesperado enviando mensaje: {e}")
     
     def get_messages(self, topic: str, consumer_group: str = None):
-        """Obtiene mensajes de un topic"""
-        if topic in self.topics:
-            messages = self.topics[topic].copy()
-            self.topics[topic].clear()
+        """Obtiene mensajes de un topic real de Kafka"""
+        try:
+            if topic not in self.consumers:
+                # Crear nuevo consumer para este topic
+                group_id = consumer_group or f"central_{topic}_group"
+                self.consumers[topic] = KafkaConsumer(
+                    topic,
+                    bootstrap_servers=[self.bootstrap_servers],
+                    auto_offset_reset='earliest',  # Leer desde el inicio si no hay offset
+                    enable_auto_commit=True,
+                    auto_commit_interval_ms=1000,
+                    group_id=group_id,
+                    value_deserializer=lambda x: json.loads(x.decode('utf-8')) if x else None,
+                    consumer_timeout_ms=1000  # Timeout para no bloquear
+                )
+                logger.debug(f"🆕 Nuevo consumer creado para topic: {topic}, group: {group_id}")
+            
+            consumer = self.consumers[topic]
+            messages = []
+            
+            # Leer mensajes disponibles
+            records = consumer.poll(timeout_ms=1000)
+            
+            for topic_partition, message_batch in records.items():
+                for message in message_batch:
+                    if message.value:
+                        messages.append({
+                            'timestamp': datetime.fromtimestamp(message.timestamp / 1000),
+                            'message': message.value
+                        })
+                        logger.debug(f"📥 Mensaje REAL recibido de {topic}: {message.value}")
+            
             if messages:
-                logger.debug(f"📥 Mensajes consumidos de {topic}: {len(messages)}")
+                logger.debug(f"📥 {len(messages)} mensajes REALES consumidos de {topic}")
+            
             return messages
-        return []
-    """
-    def peek_messages(self, topic: str):
-        ""Mira los mensajes sin consumirlos""
-        if topic in self.topics:
-            return self.topics[topic].copy()
-        return []
-    """
+            
+        except KafkaError as e:
+            logger.error(f"❌ Error consumiendo mensajes de Kafka: {e}")
+            return []
+        except Exception as e:
+            logger.error(f"❌ Error inesperado consumiendo mensajes: {e}")
+            return []
+    
+    def close(self):
+        """Cierra las conexiones de Kafka"""
+        try:
+            if self.producer:
+                self.producer.close()
+            
+            for consumer in self.consumers.values():
+                consumer.close()
+                
+            logger.info("🔌 Conexiones de Kafka cerradas")
+        except Exception as e:
+            logger.error(f"❌ Error cerrando conexiones Kafka: {e}")
+
 class SocketServer:
     """Servidor de sockets para comunicación directa"""
     
@@ -546,7 +607,10 @@ class EVCentral:
     
     def __init__(self, socket_host: str, socket_port: int, kafka_servers: str, data_file: str = None):
         self.database = DatabaseManager(data_file)
-        self.kafka_manager = SimpleKafkaManager(kafka_servers)
+        
+        # Usar Kafka REAL en lugar del simulado
+        self.kafka_manager = RealKafkaManager(kafka_servers)
+        
         self.socket_server = SocketServer(socket_host, socket_port, self)
         self.auto_save_interval = 300
         self.running = False
@@ -567,16 +631,49 @@ class EVCentral:
         """Cierre graceful guardando todos los datos"""
         logger.info("🛑 Iniciando apagado graceful...")
         self.running = False
+        
+        # Cerrar conexiones Kafka
+        if hasattr(self, 'kafka_manager'):
+            self.kafka_manager.close()
+        
         self.database.save_data()
         logger.info("💾 Datos guardados correctamente")
         self.database.backup_data()
         logger.info("✅ EV_Central apagado correctamente")
         sys.exit(0)
 
+    def test_kafka_connection(self):
+        """Test para verificar la conexión a Kafka"""
+        try:
+            logger.info("🧪 Probando conexión Kafka...")
+            
+            # Enviar mensaje de prueba
+            test_message = {
+                'test': True,
+                'timestamp': datetime.now().isoformat(),
+                'message': 'Test de conexión Kafka'
+            }
+            
+            self.kafka_manager.send_message('test_topic', test_message)
+            logger.info("✅ Mensaje de prueba enviado a Kafka")
+            
+            # Intentar consumir (puede que no haya mensajes, pero verifica la conexión)
+            test_messages = self.kafka_manager.get_messages('test_topic', 'test_group')
+            logger.info(f"📥 Test - Mensajes recibidos: {len(test_messages)}")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Test de Kafka falló: {e}")
+            return False
+
     def start(self):
         """Inicia todos los servicios del sistema central"""
         logger.info("🚀 Iniciando EV_Central...")
         self.running = True
+        
+        # Test de Kafka
+        self.test_kafka_connection()
         
         # Iniciar todos los hilos
         socket_thread = threading.Thread(target=self.socket_server.start, daemon=True)
@@ -880,23 +977,31 @@ class EVCentral:
         """Loop principal para consumir mensajes de Kafka"""
         logger.info("🚀 Kafka consumer loop iniciado correctamente")
         
+        loop_count = 0
         while self.running:
             try:
-                # Procesar driver_requests
-                for msg_data in self.kafka_manager.get_messages('driver_requests'):
-                    logger.info(f"📨 Driver request: {msg_data['message']}")
-                    self.process_driver_request(msg_data['message'])
+                loop_count += 1
+                if loop_count % 10 == 0:  # Log cada 20 segundos
+                    logger.info(f"🔄 Kafka loop activo - Ciclo #{loop_count}")
                 
-                # Procesar supply_flow
-                for msg_data in self.kafka_manager.get_messages('supply_flow'):
-                    logger.info(f"⚡ Supply flow: {msg_data['message']}")
-                    self.process_supply_flow(msg_data['message'])
-                
-                # Procesar supply_response
-                for msg_data in self.kafka_manager.get_messages('supply_response'):
-                    logger.info(f"✅ Supply response: {msg_data['message']}")
-                    self.process_supply_response(msg_data['message'])
-                
+                # Verificar todos los topics
+                all_topics = ['driver_requests', 'supply_flow', 'supply_response', 'control_commands']
+                for topic in all_topics:
+                    messages = self.kafka_manager.get_messages(topic)
+                    if messages:
+                        logger.info(f"🎯 MENSAJES ENCONTRADOS en {topic}: {len(messages)}")
+                        for msg_data in messages:
+                            logger.info(f"📨 Procesando {topic}: {msg_data['message']}")
+                            
+                            if topic == 'supply_response':
+                                self.process_supply_response(msg_data['message'])
+                            elif topic == 'supply_flow':
+                                self.process_supply_flow(msg_data['message'])
+                            elif topic == 'driver_requests':
+                                self.process_driver_request(msg_data['message'])
+                            elif topic == 'control_commands':
+                                logger.info(f"⚙️ Comando recibido: {msg_data['message']}")
+            
                 time.sleep(2)
                 
             except Exception as e:
@@ -1177,7 +1282,7 @@ def main():
     print("CON PERSISTENCIA DE DATOS - VERSIÓN COMPLETA")
     print("=" * 60)
     print(f"Socket: {socket_host}:{socket_port}")
-    print(f"Kafka: {kafka_servers} (simulado)")
+    print(f"Kafka: {kafka_servers} (REAL)")
     print(f"Archivo de datos: {data_file or 'valor por defecto'}")
     print(f"Directorio de logs: {os.getenv('LOG_DIR', '/app/logs')}")
     print("=" * 60)
