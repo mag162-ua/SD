@@ -21,6 +21,7 @@ class MENSAJES_CP_M(enum.Enum):
     OK_CP = "CP_OK"
     KO_CP = "CP_KO"
     ERROR_COMM = "ERROR_COMM"
+    ERROR_REG = "ERROR#CP_no_registrado#SOLICITAR_REGISTRO"
 
 class EV_CP_M:
     def __init__(self, IP_PUERTO_E, IP_PUERTO_C, ID, LOCALIZACION, KWH):
@@ -86,7 +87,7 @@ class EV_CP_M:
         elif respuesta == "ERROR_COMM" or respuesta == MENSAJES_CP_M.REGISTER_KO.value:
             print(f"Error al registrar el monitor {self.ID} en la central: {respuesta}")
             return False
-    '''  
+    
     def escuchar_central(self):
         print(f"Escuchando mensajes de la central en {self.IP_C}:{self.PUERTO_C}...")
         # Aquí iría la lógica para escuchar mensajes de la central.
@@ -99,17 +100,10 @@ class EV_CP_M:
                 mensaje = self.socket_central.recv(1024).decode('utf-8').strip()
                 if mensaje:
                     print(f"Monitor {self.ID} recibió mensaje de la central: {mensaje}")
-                    #IP_E , PUERTO_E = self.IP_PUERTO_E.split(':')
-                    # Aquí se procesarían los mensajes recibidos de la central.
-                    if mensaje == MENSAJES_CP_M.SUMINISTRAR.value+f"#{self.ID}":
+                    if mensaje == MENSAJES_CP_M.ERROR_REG.value+f"#{self.ID}":
                         print(f"Monitor {self.ID} suministrando energía...")
-                        # Lógica para suministrar energía
-                        respuesta = self.enviar_mensaje_socket_transitiva(self.IP_E, self.PUERTO_E, MENSAJES_CP_M.SUMINISTRAR.value)
+                        self.registrarse_central()
 
-                    elif mensaje == MENSAJES_CP_M.PARAR.value+f"#{self.ID}":
-                        print(f"Monitor {self.ID} deteniendo suministro de energía...")
-                        # Lógica para detener el suministro de energía
-                        respuesta = self.enviar_mensaje_socket_transitiva(self.IP_E, self.PUERTO_E, MENSAJES_CP_M.PARAR.value)
                 else:
                     print("Conexión cerrada por la central.")
                     self.socket_central.close()
@@ -119,7 +113,7 @@ class EV_CP_M:
             except Exception as e:
                 print(f"Error al recibir mensaje de la central: {e}")
                 break
-    '''     
+         
     ### DUDA A VER : MONITOR ENVIA RESPUESTA A CENTRAL TRAS RECIBIR SUMINISTRAR/PARAR?
     def comprobar_estado_engine(self):
         #IP_E , PUERTO_E = self.IP_PUERTO_E.split(':')
@@ -156,7 +150,7 @@ class EV_CP_M:
             #print("Conexión exitosa al engine.")
             #self.comprobar_estado()
             print(f"Monitor {self.ID} activo. Iniciando hilos concurrentes.")
-            '''
+            
              # HILO 1: Vigilancia Engine (Health Check y Reportes)
             check_thread = threading.Thread(target=self.comprobar_estado_engine, daemon=True)
             check_thread.start()
@@ -164,7 +158,7 @@ class EV_CP_M:
             # HILO 2: Escucha de Central (Recepción de Comandos)
             listener_thread = threading.Thread(target=self.escuchar_central, daemon=True)
             listener_thread.start()
-            '''
+            
 
             self.comprobar_estado_engine()
 
