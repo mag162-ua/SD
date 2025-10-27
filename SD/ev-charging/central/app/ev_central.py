@@ -366,46 +366,50 @@ class RealKafkaManager:
     def get_messages(self, topic: str, consumer_group: str = None):
         """Obtiene mensajes de un topic real de Kafka"""
         try:
+            logger.info(f"🔍 get_messages llamado para topic: {topic}")
+            
             if topic not in self.consumers:
-                # Crear nuevo consumer para este topic
+                logger.info(f"🆕 Creando nuevo consumer para: {topic}")
                 group_id = consumer_group or f"central_{topic}_group"
                 self.consumers[topic] = KafkaConsumer(
                     topic,
                     bootstrap_servers=[self.bootstrap_servers],
-                    auto_offset_reset='earliest',  # Leer desde el inicio si no hay offset
+                    auto_offset_reset='earliest',
                     enable_auto_commit=True,
                     auto_commit_interval_ms=1000,
                     group_id=group_id,
                     value_deserializer=lambda x: json.loads(x.decode('utf-8')) if x else None,
-                    consumer_timeout_ms=1000  # Timeout para no bloquear
+                    consumer_timeout_ms=1000
                 )
-                logger.debug(f"🆕 Nuevo consumer creado para topic: {topic}, group: {group_id}")
+                logger.info(f"✅ Consumer creado para {topic}, group: {group_id}")
             
             consumer = self.consumers[topic]
             messages = []
             
-            # Leer mensajes disponibles
-            records = consumer.poll(timeout_ms=1000)
+            logger.info(f"📥 Polling mensajes de {topic}...")
+            records = consumer.poll(timeout_ms=2000)  # Aumentar timeout
+            
+            logger.info(f"📊 Poll result: {len(records)} partitions con mensajes")
             
             for topic_partition, message_batch in records.items():
+                logger.info(f"   📦 Partition {topic_partition}: {len(message_batch)} mensajes")
                 for message in message_batch:
                     if message.value:
                         messages.append({
                             'timestamp': datetime.fromtimestamp(message.timestamp / 1000),
                             'message': message.value
                         })
-                        logger.debug(f"📥 Mensaje REAL recibido de {topic}: {message.value}")
+                        logger.info(f"   📨 Mensaje recibido: {message.value}")
             
             if messages:
-                logger.debug(f"📥 {len(messages)} mensajes REALES consumidos de {topic}")
+                logger.info(f"✅ {len(messages)} mensajes REALES consumidos de {topic}")
+            else:
+                logger.info(f"📭 No hay mensajes en {topic}")
             
             return messages
             
-        except KafkaError as e:
-            logger.error(f"❌ Error consumiendo mensajes de Kafka: {e}")
-            return []
         except Exception as e:
-            logger.error(f"❌ Error inesperado consumiendo mensajes: {e}")
+            logger.error(f"❌ Error en get_messages para {topic}: {e}", exc_info=True)
             return []
     
     def close(self):
@@ -667,6 +671,49 @@ class EVCentral:
             logger.error(f"❌ Test de Kafka falló: {e}")
             return False
 
+    def test_kafka_detailed(self):
+        """Test detallado de Kafka"""
+        try:
+            logger.info("🧪 INICIANDO TEST KAFKA DETALLADO...")
+            
+            # 1. Verificar que podemos enviar
+            test_msg = {
+                'test': True,
+                'timestamp': datetime.now().isoformat(),
+                'source': 'central_test'
+            }
+            
+            logger.info("📤 Enviando mensaje de test a supply_response...")
+            self.kafka_manager.send_message('supply_response', test_msg)
+            logger.info("✅ Mensaje enviado")
+            
+            # 2. Verificar que podemos recibir
+            logger.info("📥 Intentando recibir mensajes...")
+            messages = self.kafka_manager.get_messages('supply_response')
+            logger.info(f"📦 Mensajes recibidos: {len(messages)}")
+            
+            # 3. Verificar conexión directa
+            from kafka import KafkaConsumer
+            logger.info("🔍 Probando conexión directa...")
+            test_consumer = KafkaConsumer(
+                'supply_response',
+                bootstrap_servers=[self.kafka_manager.bootstrap_servers],
+                auto_offset_reset='earliest',
+                enable_auto_commit=False,
+                group_id='test_direct_group',
+                consumer_timeout_ms=3000
+            )
+            
+            available = list(test_consumer)
+            logger.info(f"👀 Mensajes disponibles (directo): {len(available)}")
+            test_consumer.close()
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Test Kafka falló: {e}", exc_info=True)
+            return False
+
     def start(self):
         """Inicia todos los servicios del sistema central"""
         logger.info("🚀 Iniciando EV_Central...")
@@ -674,6 +721,7 @@ class EVCentral:
         
         # Test de Kafka
         self.test_kafka_connection()
+        self.test_kafka_detailed()
         
         # Iniciar todos los hilos
         socket_thread = threading.Thread(target=self.socket_server.start, daemon=True)
@@ -981,31 +1029,41 @@ class EVCentral:
         while self.running:
             try:
                 loop_count += 1
-                if loop_count % 10 == 0:  # Log cada 20 segundos
-                    logger.info(f"🔄 Kafka loop activo - Ciclo #{loop_count}")
+                logger.info(f"🔄 DENTRO DEL WHILE - Ciclo #{loop_count}")
                 
-                # Verificar todos los topics
-                all_topics = ['driver_requests', 'supply_flow', 'supply_response', 'control_commands']
-                for topic in all_topics:
-                    messages = self.kafka_manager.get_messages(topic)
-                    if messages:
-                        logger.info(f"🎯 MENSAJES ENCONTRADOS en {topic}: {len(messages)}")
-                        for msg_data in messages:
-                            logger.info(f"📨 Procesando {topic}: {msg_data['message']}")
+                # Verificar todos los topics UNO POR UNO con logs detallados
+                topics_to_check = ['driver_requests', 'supply_flow', 'supply_response', 'control_commands']
+                
+                for topic in topics_to_check:
+                    try:
+                        logger.info(f"🔍 Verificando topic: {topic}")
+                        messages = self.kafka_manager.get_messages(topic)
+                        logger.info(f"📦 Resultado para {topic}: {len(messages)} mensajes")
+                        
+                        if messages:
+                            logger.info(f"🎯 MENSAJES ENCONTRADOS en {topic}: {len(messages)}")
+                            for i, msg_data in enumerate(messages):
+                                logger.info(f"   📝 Mensaje {i+1}: {msg_data['message']}")
+                                
+                                if topic == 'supply_response':
+                                    self.process_supply_response(msg_data['message'])
+                                elif topic == 'supply_flow':
+                                    self.process_supply_flow(msg_data['message'])
+                                elif topic == 'driver_requests':
+                                    self.process_driver_request(msg_data['message'])
+                        else:
+                            logger.debug(f"📭 No hay mensajes en {topic}")
                             
-                            if topic == 'supply_response':
-                                self.process_supply_response(msg_data['message'])
-                            elif topic == 'supply_flow':
-                                self.process_supply_flow(msg_data['message'])
-                            elif topic == 'driver_requests':
-                                self.process_driver_request(msg_data['message'])
-                            elif topic == 'control_commands':
-                                logger.info(f"⚙️ Comando recibido: {msg_data['message']}")
-            
+                    except Exception as e:
+                        logger.error(f"❌ Error en topic {topic}: {e}", exc_info=True)
+                
+                logger.info(f"💤 Esperando 2 segundos...")
                 time.sleep(2)
+                logger.info(f"✅ Ciclo #{loop_count} completado")
                 
             except Exception as e:
-                logger.error(f"❌ Error en consumidor Kafka: {e}", exc_info=True)
+                logger.error(f"💥 ERROR CRÍTICO en kafka_consumer_loop: {e}", exc_info=True)
+                logger.info("💤 Esperando 5 segundos antes de reintentar...")
                 time.sleep(5)
         
         logger.info("🛑 Kafka consumer loop detenido")
@@ -1242,23 +1300,36 @@ class EVCentral:
             })
     
     def authorize_cp_supply(self, cp_id: str, driver_id: str) -> bool:
-        """Autoriza suministro en el CP via socket"""
+        """Autoriza suministro en el CP via socket Y Kafka"""
         try:
-            cp = self.database.get_charging_point(cp_id)
-            if not cp or not cp.socket_connection:
-                logger.error(f"❌ No hay conexión socket con CP {cp_id}")
-                return False
+            # Enviar comando START por Kafka
+            control_message = {
+                'cp_id': cp_id,
+                'command': 'START',  # Comando para iniciar suministro
+                'driver_id': driver_id,
+                'timestamp': datetime.now().isoformat(),
+                'source': 'central'
+            }
+            self.kafka_manager.send_message('control_commands', control_message)
+            logger.info(f"📤 Comando START enviado a CP {cp_id} via Kafka")
             
-            auth_message = f"SUMINISTRO_AUTORIZADO#{driver_id}"
-            cp.socket_connection.send(auth_message.encode('utf-8'))
+            # También enviar por socket (backup)
+            cp = self.database.get_charging_point(cp_id)
+            if cp and cp.socket_connection:
+                try:
+                    auth_message = f"SUMINISTRO_AUTORIZADO#{driver_id}"
+                    cp.socket_connection.send(auth_message.encode('utf-8'))
+                    logger.info(f"📤 Comando enviado a CP {cp_id} via socket")
+                except:
+                    logger.warning(f"⚠️ No se pudo enviar comando via socket a CP {cp_id}")
             
             self.update_cp_status(cp_id, "SUMINISTRANDO", driver_id=driver_id)
-            logger.info(f"✅ CP {cp_id} confirmó autorización para driver {driver_id}")
+            logger.info(f"✅ Suministro autorizado para CP {cp_id} - Conductor: {driver_id}")
             return True
+            
         except Exception as e:
             logger.error(f"❌ Error autorizando suministro en CP {cp_id}: {e}", exc_info=True)
             return False
-
 def main():
     """Función principal"""
     
