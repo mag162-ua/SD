@@ -28,6 +28,7 @@ class EV_CP_E:
     PUERTO_BASE = 6000 # Atributo statico para el puerto base
     TOPICO_ACCION = "supply_flow" # Atributo statico para el tópico
     TOPICO_SUMINISTRO = "supply_response" # Atributo statico para el tópico
+    TIMEOUT = 2
 
     def __init__(self, IP_PUERTO_BROKER, PUERTO):
         self.ID = None
@@ -41,6 +42,8 @@ class EV_CP_E:
         self.consumer = None
         self.suministrar_actvio = False
         self.parar_suministro = threading.Event()
+        self.respuesta_menu_opc_3 = threading.Event()
+        #self.suministro_aprobado = False
         self.espera_respuesta_menu = threading.Event()
         self.total_kwh_suministrados = 0.0
         print(f"Engine inicializado con IP_BROKER: {self.IP_BROKER}, PUERTO_BROKER: {self.PUERTO_BROKER}")
@@ -148,12 +151,13 @@ class EV_CP_E:
                 if cp_id == self.ID:
                     if type == MENSAJES_CP_M.SOL_SUMINISTRO.value:
                         print("Suministro autorizado por la central.")
-                        '''
+                        
                         if not self.suministrar_actvio:
                             print("Iniciando suministro...")
                             self.suministrar_actvio = True
                             self.parar_suministro.clear()  # Señal para iniciar el suministro
-                            self.total_kwh_suministrados = 0
+                            self.total_kwh_suministrados = 0.0
+                            self.respuesta_menu_opc_3.set()
                             suministrar_thread = threading.Thread(target=self.suministrar_energia, daemon=True)
                             respuesta =  {'cp_id': self.ID, 'approve': True, 'reason': 'Suministro iniciado'}
                             self.producer.send(EV_CP_E.TOPICO_SUMINISTRO, json.dumps(respuesta))
@@ -165,17 +169,9 @@ class EV_CP_E:
                             respuesta =  {'cp_id': self.ID, 'approve': False, 'reason': 'Suministro ya iniciado'}
                             self.producer.send(EV_CP_E.TOPICO_SUMINISTRO, json.dumps(respuesta))
                             self.producer.flush()
-                        '''
-                        if self.comprobar_si_suministrar():
-                            print("Iniciando suministro...")
-                        else:
-                            print("El suministro ya está activo.")
-                            respuesta =  {'cp_id': self.ID, 'approve': False, 'reason': 'Suministro ya iniciado'}
-                            self.producer.send(EV_CP_E.TOPICO_SUMINISTRO, json.dumps(respuesta))
-                            self.producer.flush()
 
                     elif type == MENSAJES_CP_M.SOL_PARAR.value:
-                        '''
+                        
                         if self.suministrar_actvio:
                             print("Suministro detenido por la central.")
                             #self.producer.send(EV_CP_E.TOPICO_SUMINISTRO, MENSAJES_CP_M.PARAR.value+f"#{self.ID}#YA_PARADO")
@@ -194,26 +190,24 @@ class EV_CP_E:
                             print("Suministro detenido por la central.")
                         else:
                             print("El suministro ya está detenido.")
-
+                        '''
 
         except Exception as e:
             print(f"Error al escuchar la central: {e}")
-
+    '''
     def comprobar_si_suministrar(self):
         if self.estado == MENSAJES_CP_M.STATUS_OK.value or not self.suministrar_actvio:
-            self.suministrar_actvio = True
+            #self.suministrar_actvio = True
             self.total_kwh_suministrados = 0.0
             self.parar_suministro.clear()
             mensaje = {'reason':MENSAJES_CP_M.SUMINISTRAR.value, 'cp_id': self.ID, 'approve':True}
             self.producer.send(EV_CP_E.TOPICO_SUMINISTRO, json.dumps(mensaje))
             self.producer.flush()
-            suministrar_thread = threading.Thread(target=self.suministrar_energia, daemon=True)
-            suministrar_thread.start()
-
-            return True
-        else:
-            return False
-
+            #time.sleep(EV_CP_E.TIMEOUT)
+            respuesta = self.respuesta_menu_opc_3.wait(timeout=EV_CP_E.TIMEOUT)
+            return bool(respuesta)
+        return False
+    
     def comprobar_si_parar(self):
         if self.suministrar_actvio:
             respuesta = {'cp_id': self.ID, 'approve': True, 'reason': 'Parado'}  # importante: reason 'stop' para que central lo procese correctamente
@@ -223,7 +217,7 @@ class EV_CP_E:
             return True
         else:
             return False
-
+    '''
     def suministrar_energia(self):
         print("Suministro de energía iniciado.")
         #canidadatos_kwh = 0.0
@@ -269,9 +263,9 @@ class EV_CP_E:
                     print(f"Total kWh suministrados hasta ahora: {self.total_kwh_suministrados:.2f} kWh")
                     print("-----------------------------------")
                 print("Seleccione una opción: ")
-                if not self.espera_respuesta_menu.is_set():
-                    response_menu_thread = threading.Thread(target=self.responder_menu, daemon=True)
-                    response_menu_thread.start()
+                #if not self.espera_respuesta_menu.is_set():
+                response_menu_thread = threading.Thread(target=self.responder_menu, daemon=True)
+                response_menu_thread.start()
 
             time.sleep(1)
 
@@ -297,12 +291,27 @@ class EV_CP_E:
                 self.estado = MENSAJES_CP_M.STATUS_OK.value
 
         elif switch == "3":
+            if self.estado == MENSAJES_CP_M.STATUS_OK.value and not self.suministrar_actvio:
+                mensaje = {'reason':MENSAJES_CP_M.SUMINISTRAR.value, 'cp_id': self.ID, 'approve':True}
+                self.producer.send(EV_CP_E.TOPICO_SUMINISTRO, json.dumps(mensaje))
+                self.producer.flush()
+                respuesta = self.respuesta_menu_opc_3.wait(timeout=EV_CP_E.TIMEOUT)
+                if not respuesta:
+                    print("IMPOSIBLE_SUMINISTRAR: No se ha recibido permiso de la central")
+            elif self.estado == MENSAJES_CP_M.STATUS_OK.value:
+                respuesta = {'cp_id': self.ID, 'approve': True, 'reason': MENSAJES_CP_M.PARAR.value}  # importante: reason 'stop' para que central lo procese correctamente
+                self.producer.send(EV_CP_E.TOPICO_SUMINISTRO, json.dumps(respuesta))
+                self.producer.flush()
+            else:
+                print("IMPOSIBLE_SUMINISTRAR: El punto de carga se encuentra averiado")
+
+            '''
             if self.comprobar_si_parar():
                 print("DETENIENDO EL SUMINISTRO: El punto de carga terminará de suministrar")
             else:
                 if not self.comprobar_si_suministrar():
                     print("IMPOSIBLE_SUMINISTRAR: El punto de carga se encuentra averiado")
-
+            '''
         elif switch == "4":
             if engine.total_kwh_suministrados != 0.0:
                 engine.guardar_estado()
