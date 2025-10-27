@@ -464,43 +464,43 @@ class SocketServer:
             client_socket.send(response.encode('utf-8'))
             logger.error(f"❌ Error inesperado registrando CP {cp_id}")
     
-def handle_cp_ok(self, params: List[str], client_socket):
-    """Maneja ok de puntos de carga y envía confirmación"""
-    if params:
-        cp_id = params[0]
-        cp = self.central.database.get_charging_point(cp_id)
-        if not cp:
-            logger.warning(f"⚠️ CP {cp_id} no registrado - Solicitando registro")
-            response = "ERROR#CP_no_registrado#SOLICITAR_REGISTRO"
-            client_socket.send(response.encode('utf-8'))
-            logger.info(f"📋 Solicitando registro a CP no registrado: {cp_id}")
-            return
+    def handle_cp_ok(self, params: List[str], client_socket):
+        """Maneja ok de puntos de carga y envía confirmación"""
+        if params:
+            cp_id = params[0]
+            cp = self.central.database.get_charging_point(cp_id)
+            if not cp:
+                logger.warning(f"⚠️ CP {cp_id} no registrado - Solicitando registro")
+                response = "ERROR#CP_no_registrado#SOLICITAR_REGISTRO"
+                client_socket.send(response.encode('utf-8'))
+                logger.info(f"📋 Solicitando registro a CP no registrado: {cp_id}")
+                return
+                
+            if cp:
+                cp.last_heartbeat = datetime.now()
             
-        if cp:
-            cp.last_heartbeat = datetime.now()
-        
-            status_changed = False
-            if cp.status == "DESCONECTADO":
-                self.central.update_cp_status(cp_id, "ACTIVADO")
-                logger.info(f"🔄 CP {cp_id} reactivado - Estado cambiado a ACTIVADO")
-                status_changed = True
-            elif cp.status == "AVERIADO":
-                self.central.update_cp_status(cp_id, "ACTIVADO")
-                logger.info(f"🔄 CP {cp_id} reactivado - Estado anterior AVERIADO cambiado a ACTIVADO")
-                status_changed = True
-            
-            response = f"CP_OK_ACK#{cp_id}"
-            if status_changed:
-                response += "#ESTADO_ACTUALIZADO"
-            
-            client_socket.send(response.encode('utf-8'))
-            logger.debug(f"💓 Heartbeat recibido de {cp_id} - Confirmación enviada")
-            
-        else:
-            # CP no encontrado - enviar error
-            response = f"ERROR#CP_no_encontrado#{cp_id}"
-            client_socket.send(response.encode('utf-8'))
-            logger.error(f"❌ CP {cp_id} no encontrado para mensaje CP_OK")
+                status_changed = False
+                if cp.status == "DESCONECTADO":
+                    self.central.update_cp_status(cp_id, "ACTIVADO")
+                    logger.info(f"🔄 CP {cp_id} reactivado - Estado cambiado a ACTIVADO")
+                    status_changed = True
+                elif cp.status == "AVERIADO":
+                    self.central.update_cp_status(cp_id, "ACTIVADO")
+                    logger.info(f"🔄 CP {cp_id} reactivado - Estado anterior AVERIADO cambiado a ACTIVADO")
+                    status_changed = True
+                
+                response = f"CP_OK_ACK#{cp_id}"
+                if status_changed:
+                    response += "#ESTADO_ACTUALIZADO"
+                
+                client_socket.send(response.encode('utf-8'))
+                logger.debug(f"💓 Heartbeat recibido de {cp_id} - Confirmación enviada")
+                
+            else:
+                # CP no encontrado - enviar error
+                response = f"ERROR#CP_no_encontrado#{cp_id}"
+                client_socket.send(response.encode('utf-8'))
+                logger.error(f"❌ CP {cp_id} no encontrado para mensaje CP_OK")
 
     def handle_cp_failure(self, params: List[str], client_socket):
         """Maneja mensajes de avería CP_KO"""
