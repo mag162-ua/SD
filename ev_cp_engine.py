@@ -77,19 +77,22 @@ class EV_CP_E:
                 bootstrap_servers=[f"{self.IP_BROKER}:{self.PUERTO_BROKER}"], 
                 value_serializer=lambda v: json.dumps(v).encode('utf-8')
             )
+            
+            # CORRECCIÓN: TODOS los Engines en el MISMO grupo
             self.consumer = KafkaConsumer(
                 EV_CP_E.TOPICO_CONTROL, 
                 bootstrap_servers=[f"{self.IP_BROKER}:{self.PUERTO_BROKER}"], 
-                auto_offset_reset='latest', 
+                auto_offset_reset='earliest',  # Cambiar a 'earliest'
                 enable_auto_commit=True, 
-                group_id=f'engine_{self.ID}_group', 
+                #group_id='all_engines_group',  # MISMO grupo para todos
                 value_deserializer=lambda x: json.loads(x.decode('utf-8')) if x else None
             )
-            print("Conexión Kafka abierta correctamente.")
+            
+            print("✅ Conexión Kafka abierta - Todos en MISMO grupo")
             return True
         
         except Exception as e:
-            print(f"Error al abrir la conexión Kafka: {e}")
+            print(f"❌ Error al abrir la conexión Kafka: {e}")
             if (hasattr(self, 'producer') and self.producer) or (hasattr(self, 'consumer') and self.consumer): 
                 self.producer.close()
                 self.consumer.close()
@@ -127,38 +130,59 @@ class EV_CP_E:
                     conexion_monitor.close()
 
     def escuchar_central(self):
-        """Escucha comandos de la Central - CORREGIDO"""
+        """Escucha comandos de la Central - SIN FILTRADO COMPLEJO"""
         if self.consumer is None:
             print("Consumidor Kafka no está inicializado.")
             return
 
-        print(f"🔍 Escuchando mensajes de la central en topic: {EV_CP_E.TOPICO_CONTROL}")
+        print(f"🔍 Escuchando mensajes de la central...")
         
         try:
             for mensaje in self.consumer:
                 try:
                     mensaje_valor = mensaje.value
-                    print(f"📨 Mensaje recibido de la central: {mensaje_valor}")
+                    print(f"📨 Mensaje recibido: {mensaje_valor}")
                     
+                    # Parsear si es necesario
+                    if isinstance(mensaje_valor, str):
+                        try:
+                            mensaje_valor = json.loads(mensaje_valor)
+                        except json.JSONDecodeError:
+                            continue
+                    
+                    # Verificar que es un diccionario
+                    if not isinstance(mensaje_valor, dict):
+                        continue
+                    
+                    # FILTRADO SIMPLE por cp_id
                     cp_id = mensaje_valor.get('cp_id')
-                    command = mensaje_valor.get('command')
+                    if not cp_id or str(cp_id) != str(self.ID):
+                        print(f"📭 Mensaje para CP {cp_id}, este es CP {self.ID} - IGNORADO")
+                        continue
                     
-                    if cp_id == self.ID:
-                        print(f"🎯 Mensaje para este CP {self.ID}")
-                        
-                        if command == 'START':
-                            print("🚀 Comando START recibido - Iniciando suministro...")
-                            if not self.suministrar_actvio:
-                                self.iniciar_suministro()
-                                
-                        elif command == 'STOP':
-                            print("🛑 Comando STOP recibido - Deteniendo suministro...")
-                            if self.suministrar_actvio:
-                                self.detener_suministro()
-                                
+                    print(f"🎯 MENSAJE PARA ESTE CP {self.ID} - PROCESANDO")
+                    
+                    # Procesar comando
+                    command = mensaje_valor.get('command')
+                    print(f"⚡ Comando: {command}")
+                    
+                    if command == 'START':
+                        print("🚀 INICIANDO SUMINISTRO...")
+                        if not self.suministrar_actvio:
+                            self.iniciar_suministro()
+                        else:
+                            print("ℹ️ Ya estaba suministrando")
+                            
+                    elif command == 'STOP':
+                        print("🛑 DETENIENDO SUMINISTRO...")
+                        if self.suministrar_actvio:
+                            self.detener_suministro()
+                        else:
+                            print("ℹ️ Ya estaba detenido")
+                            
                 except Exception as e:
                     print(f"❌ Error procesando mensaje: {e}")
-                    
+                        
         except Exception as e:
             print(f"❌ Error en escuchar_central: {e}")
 
@@ -284,7 +308,7 @@ class EV_CP_E:
                 # SOLICITAR INICIO de suministro a la Central
                 print("🚀 Solicitando inicio de suministro a la central...")
                 mensaje_inicio = {
-                    'cp_id': self.ID,
+                    'cp_id': self.ID,  # CORRECCIÓN: Incluir siempre el cp_id
                     'type': 'SUPPLY_REQUEST',
                     'driver_id': 'MANUAL_ENGINE',
                     'timestamp': datetime.now().isoformat(),
@@ -295,10 +319,10 @@ class EV_CP_E:
                 print("✅ Solicitud de inicio enviada a la central")
                 
             elif self.estado == MENSAJES_CP_M.STATUS_OK.value and self.suministrar_actvio:
-                # DETENER suministro - ENVIAR MENSAJE DE STOP CORRECTO
+                # DETENER suministro
                 print("🛑 Enviando solicitud de PARADA a la central...")
                 mensaje_stop = {
-                    'cp_id': self.ID,
+                    'cp_id': self.ID,  # CORRECCIÓN: Incluir siempre el cp_id
                     'type': 'STOP_SUPPLY',
                     'reason': 'MANUAL_STOP_ENGINE',
                     'timestamp': datetime.now().isoformat()
