@@ -351,8 +351,6 @@ class RealKafkaManager:
         try:
             if self.producer:
                 future = self.producer.send(topic, message)
-                # Opcional: esperar confirmación
-                # future.get(timeout=10)
                 self.producer.flush()
                 logger.debug(f"📤 Mensaje REAL enviado a {topic}: {message}")
             else:
@@ -364,7 +362,7 @@ class RealKafkaManager:
             logger.error(f"❌ Error inesperado enviando mensaje: {e}")
     
     def get_messages(self, topic: str, consumer_group: str = None):
-        """Obtiene mensajes de un topic real de Kafka"""
+        """Obtiene mensajes de un topic real de Kafka - CORREGIDO"""
         try:
             logger.info(f"🔍 get_messages llamado para topic: {topic}")
             
@@ -378,7 +376,7 @@ class RealKafkaManager:
                     enable_auto_commit=True,
                     auto_commit_interval_ms=1000,
                     group_id=group_id,
-                    value_deserializer=lambda x: json.loads(x.decode('utf-8')) if x else None,
+                    value_deserializer=lambda x: x.decode('utf-8') if x else None,
                     consumer_timeout_ms=1000
                 )
                 logger.info(f"✅ Consumer creado para {topic}, group: {group_id}")
@@ -387,7 +385,15 @@ class RealKafkaManager:
             messages = []
             
             logger.info(f"📥 Polling mensajes de {topic}...")
-            records = consumer.poll(timeout_ms=2000)  # Aumentar timeout
+            try:
+                records = consumer.poll(timeout_ms=2000)
+            except Exception as e:
+                if "KafkaConsumer is closed" in str(e):
+                    logger.warning(f"🔄 Consumer cerrado, recreando para {topic}")
+                    del self.consumers[topic]
+                    return self.get_messages(topic, consumer_group)
+                else:
+                    raise e
             
             logger.info(f"📊 Poll result: {len(records)} partitions con mensajes")
             
@@ -395,11 +401,22 @@ class RealKafkaManager:
                 logger.info(f"   📦 Partition {topic_partition}: {len(message_batch)} mensajes")
                 for message in message_batch:
                     if message.value:
-                        messages.append({
-                            'timestamp': datetime.fromtimestamp(message.timestamp / 1000),
-                            'message': message.value
-                        })
-                        logger.info(f"   📨 Mensaje recibido: {message.value}")
+                        try:
+                            # PARSEAR MANUALMENTE el JSON
+                            if isinstance(message.value, str):
+                                message_dict = json.loads(message.value)
+                            else:
+                                message_dict = json.loads(message.value.decode('utf-8'))
+                            
+                            messages.append({
+                                'timestamp': datetime.fromtimestamp(message.timestamp / 1000),
+                                'message': message_dict
+                            })
+                            logger.info(f"   📨 Mensaje recibido (TIPO: {type(message_dict)}): {message_dict}")
+                        except json.JSONDecodeError as e:
+                            logger.error(f"❌ Error parseando JSON: {e} - Mensaje: {message.value}")
+                        except Exception as e:
+                            logger.error(f"❌ Error procesando mensaje: {e} - Mensaje: {message.value}")
             
             if messages:
                 logger.info(f"✅ {len(messages)} mensajes REALES consumidos de {topic}")
@@ -410,6 +427,10 @@ class RealKafkaManager:
             
         except Exception as e:
             logger.error(f"❌ Error en get_messages para {topic}: {e}", exc_info=True)
+            # Si el consumer está cerrado, eliminarlo para recrearlo en el próximo intento
+            if topic in self.consumers and "closed" in str(e).lower():
+                logger.warning(f"🗑️ Eliminando consumer cerrado para {topic}")
+                del self.consumers[topic]
             return []
     
     def close(self):
@@ -591,14 +612,6 @@ class SocketServer:
             
             response = f"CP_KO_ACK#{cp_id}"
             client_socket.send(response.encode('utf-8'))
-
-            """
-            failure_message = {
-                
-            }
-
-            self.kafka_manager.send_message('d', failure_message)
-            """
             
             logger.info(f"🔴 CP {cp_id} puesto en estado AVERIADO")
         else:
@@ -978,7 +991,7 @@ class EVCentral:
         )
     
     def send_control_command(self, cp_id: str, command: str):
-        """Envía comandos de control a CPs via Kafka"""
+        """Envía comandos de control a CPs via Kafka - MEJORADO"""
         cp = self.database.get_charging_point(cp_id)
         if cp:
             logger.info(f"🔄 Enviando comando {command} a CP {cp_id} via Kafka")
@@ -993,10 +1006,18 @@ class EVCentral:
             self.kafka_manager.send_message('control_commands', control_message)
             logger.debug(f"📤 Mensaje Kafka enviado a control_commands: {control_message}")
             
+            # CORRECCIÓN: Solo actualizar estado local para comandos manuales
+            # Los comandos automáticos desde el Engine ya manejan su estado
             if command == "STOP":
-                self.update_cp_status(cp_id, "PARADO")
-                logger.info(f"⏹️ CP {cp_id} puesto en estado PARADO")
-                print(f"✅ Punto de carga {cp_id} parado")
+                if cp.status == "SUMINISTRANDO":
+                    self.update_cp_status(cp_id, "PARADO")
+                    logger.info(f"⏹️ CP {cp_id} puesto en estado PARADO")
+                print(f"✅ Comando STOP enviado a punto de carga {cp_id}")
+            elif command == "START":
+                if cp.status == "ACTIVADO":
+                    self.update_cp_status(cp_id, "SUMINISTRANDO")
+                    logger.info(f"▶️ CP {cp_id} puesto en estado SUMINISTRANDO")
+                print(f"✅ Comando START enviado a punto de carga {cp_id}")
             elif command == "RESUME":
                 self.update_cp_status(cp_id, "ACTIVADO") 
                 logger.info(f"▶️ CP {cp_id} puesto en estado ACTIVADO")
@@ -1012,7 +1033,7 @@ class EVCentral:
             logger.info("🔄 Iniciando hilo del consumidor Kafka...")
             kafka_thread = threading.Thread(
                 target=self.kafka_consumer_loop,
-                daemon=False,  # ← CAMBIAR a False para que sobreviva
+                daemon=True,
                 name="KafkaConsumerThread"
             )
             kafka_thread.start()
@@ -1022,7 +1043,7 @@ class EVCentral:
             logger.error(f"❌ Error iniciando consumidor Kafka: {e}", exc_info=True)
     
     def kafka_consumer_loop(self):
-        """Loop principal para consumir mensajes de Kafka"""
+        """Loop principal para consumir mensajes de Kafka - CORREGIDO"""
         logger.info("🚀 Kafka consumer loop iniciado correctamente")
         
         loop_count = 0
@@ -1043,14 +1064,19 @@ class EVCentral:
                         if messages:
                             logger.info(f"🎯 MENSAJES ENCONTRADOS en {topic}: {len(messages)}")
                             for i, msg_data in enumerate(messages):
-                                logger.info(f"   📝 Mensaje {i+1}: {msg_data['message']}")
+                                message_content = msg_data['message']
+                                logger.info(f"   📝 Mensaje {i+1} (TIPO: {type(message_content)}): {message_content}")
                                 
-                                if topic == 'supply_response':
-                                    self.process_supply_response(msg_data['message'])
-                                elif topic == 'supply_flow':
-                                    self.process_supply_flow(msg_data['message'])
-                                elif topic == 'driver_requests':
-                                    self.process_driver_request(msg_data['message'])
+                                try:
+                                    if topic == 'supply_response':
+                                        self.process_supply_response(message_content)
+                                    elif topic == 'supply_flow':
+                                        self.process_supply_flow(message_content)
+                                    elif topic == 'driver_requests':
+                                        self.process_driver_request(message_content)
+                                except Exception as e:
+                                    logger.error(f"❌ Error procesando mensaje en {topic}: {e}")
+                        
                         else:
                             logger.debug(f"📭 No hay mensajes en {topic}")
                             
@@ -1068,14 +1094,27 @@ class EVCentral:
         
         logger.info("🛑 Kafka consumer loop detenido")
 
-    def process_supply_response(self, message: dict):
-        """Procesa respuestas de suministro desde el Engine"""
-        logger.info(f"🎯 process_supply_response llamado con: {message}")
+    def process_supply_response(self, message):
+        """Procesa respuestas de suministro desde el Engine - CORREGIDO"""
+        logger.info(f"🎯 process_supply_response llamado con: {message} (TIPO: {type(message)})")
         try:
+            # Manejar tanto diccionarios como strings
+            if isinstance(message, str):
+                try:
+                    message = json.loads(message)
+                    logger.info(f"🔄 Mensaje parseado de string a dict: {message}")
+                except json.JSONDecodeError as e:
+                    logger.error(f"❌ Error parseando mensaje string a JSON: {e}")
+                    return
+            elif not isinstance(message, dict):
+                logger.error(f"❌ Mensaje no es ni string ni diccionario: {type(message)} - {message}")
+                return
+
+            # Ahora message debería ser un diccionario
             cp_id = message.get('cp_id')
-            approve = message.get('approve', False)
+            message_type = message.get('type')  # Cambiado de 'approve' a 'type'
             reason = message.get('reason', 'No especificado')
-            
+
             if not cp_id:
                 logger.error("❌ Mensaje de suministro sin CP_ID")
                 return
@@ -1085,68 +1124,107 @@ class EVCentral:
                 logger.error(f"❌ CP {cp_id} no encontrado para mensaje de suministro")
                 return
 
-            if approve:
-                # Suministro aprobado - iniciar carga
-                self.update_cp_status(
-                    cp_id=cp_id,
-                    status="SUMINISTRANDO",
-                    driver_id=cp.driver_id  # Mantener el driver_id actual
-                )
-                
-                # Enviar confirmación al Engine
-                approval_message = {
-                    'cp_id': cp_id,
-                    'driver_id': cp.driver_id,
-                    'type': 'SUPPLY_APPROVED',
-                    'timestamp': datetime.now().isoformat(),
-                    'message': 'Suministro iniciado correctamente'
-                }
-                
-                self.kafka_manager.send_message('supply_flow', approval_message)
-                logger.info(f"✅ Suministro aprobado para CP {cp_id} - Conductor: {cp.driver_id}")
-                
-            else:
-                # Suministro rechazado o detenido
-                
-                if reason.lower() == "stop" and cp.status == "SUMINISTRANDO":
-                    # Parada normal del suministro
-                    self.update_cp_status(cp_id, "ACTIVADO")
-                    logger.info(f"🟢 Suministro finalizado para CP {cp_id}")
-                else:
-                    # Rechazo antes de iniciar suministro
-                    logger.info(f"❌ Suministro rechazado para CP {cp_id} - Estado actual: {cp.status} - Razón: {reason}")
+            # CORRECCIÓN: Manejar los tipos de mensaje del Engine
+            if message_type == 'SUPPLY_REQUEST':
+                # El Engine solicita iniciar suministro
+                if cp.status == "ACTIVADO":
+                    # Autorizar suministro
+                    driver_id = message.get('driver_id', 'MANUAL_ENGINE')
                     
+                    # Enviar comando START al Engine
+                    control_message = {
+                        'cp_id': cp_id,
+                        'command': 'START',
+                        'driver_id': driver_id,
+                        'timestamp': datetime.now().isoformat(),
+                        'source': 'central'
+                    }
+                    self.kafka_manager.send_message('control_commands', control_message)
+                    logger.info(f"✅ Suministro AUTORIZADO para CP {cp_id} - Comando START enviado")
+                    
+                    # Actualizar estado local
+                    self.update_cp_status(
+                        cp_id=cp_id,
+                        status="SUMINISTRANDO",
+                        driver_id=driver_id
+                    )
+                else:
+                    logger.warning(f"❌ CP {cp_id} no está ACTIVADO - Estado actual: {cp.status}")
+                    
+            elif message_type == 'STOP_SUPPLY':
+                # El Engine solicita parar suministro
+                if cp.status == "SUMINISTRANDO":
+                    # Enviar comando STOP al Engine
+                    control_message = {
+                        'cp_id': cp_id,
+                        'command': 'STOP',
+                        'timestamp': datetime.now().isoformat(),
+                        'source': 'central'
+                    }
+                    self.kafka_manager.send_message('control_commands', control_message)
+                    logger.info(f"🛑 Suministro DETENIDO para CP {cp_id} - Comando STOP enviado")
+                    
+                    # Actualizar estado local
+                    self.update_cp_status(cp_id, "ACTIVADO")
+                else:
+                    logger.info(f"ℹ️ CP {cp_id} ya estaba detenido - Estado: {cp.status}")
+                    
+            else:
+                logger.warning(f"⚠️ Tipo de mensaje no reconocido: {message_type}")
+                
         except Exception as e:
             logger.error(f"❌ Error procesando respuesta de suministro: {e}", exc_info=True)
         
-    def process_supply_flow(self, message: dict):
-        """Procesa mensajes de caudal de suministro desde el Engine"""
+    def process_supply_flow(self, message):
+        """Procesa mensajes de caudal de suministro desde el Engine - CORREGIDO"""
+        logger.info(f"🎯 process_supply_flow llamado con: {message} (TIPO: {type(message)})")
         try:
+            # Manejar tanto diccionarios como strings
+            if isinstance(message, str):
+                try:
+                    message = json.loads(message)
+                    logger.info(f"🔄 Mensaje parseado de string a dict: {message}")
+                except json.JSONDecodeError as e:
+                    logger.error(f"❌ Error parseando mensaje string a JSON: {e}")
+                    return
+            elif not isinstance(message, dict):
+                logger.error(f"❌ Mensaje no es ni string ni diccionario: {type(message)} - {message}")
+                return
+
             cp_id = message.get('cp_id')
-            driver_id = message.get('driver_id', 'ANONIMO')
-            kwh = message.get('kwh', 0.0)  # kWh totales suministrados
-            timestamp = message.get('timestamp')
+            driver_id = message.get('driver_id', 'MANUAL')
+            kwh = message.get('kwh', 0.0)
             reason = message.get('reason', '')
             
             if not cp_id:
                 logger.error("❌ Parámetros insuficientes en mensaje de suministro")
                 return
             
-            # Calcular el caudal actual (kW) basado en el incremento de kWh
             cp = self.database.get_charging_point(cp_id)
-            current_flow_rate = 0.0
-            
-            if cp and cp.total_energy_supplied > 0:
-                # Estimación del caudal basada en el incremento de energía
-                # (esto es una aproximación, idealmente el Engine debería enviar el caudal)
-                energy_increment = kwh - cp.total_energy_supplied
-                current_flow_rate = max(0.0, energy_increment * 3600)  # Convertir kWh/s a kW
-            
+            if not cp:
+                logger.error(f"❌ CP {cp_id} no encontrado")
+                return
+
+            # CORRECCIÓN: Manejar diferentes razones del mensaje
+            if reason == 'SUPPLY_ENDED':
+                # Suministro finalizado
+                if cp.status == "SUMINISTRANDO":
+                    # Registrar transacción completada
+                    if cp.current_amount > 0:
+                        self.record_transaction(cp, "COMPLETED")
+                    
+                    self.update_cp_status(cp_id, "ACTIVADO")
+                    logger.info(f"✅ Suministro FINALIZADO - CP: {cp_id}, Energía total: {kwh:.2f}kWh")
+                return
+
+            # Suministro en progreso
             # Calcular importe actual basado en el precio del CP
-            current_amount = 0.0
-            if cp:
-                current_amount = kwh * cp.price_per_kwh
+            current_amount = kwh * cp.price_per_kwh
             
+            # Calcular caudal (kW) basado en incremento de energía
+            # Asumimos 1 kWh por segundo para simplificar (en realidad sería menos)
+            current_flow_rate = 1.0  # kW
+
             # Actualizar el estado del CP
             self.update_cp_status(
                 cp_id=cp_id,
@@ -1157,22 +1235,11 @@ class EVCentral:
             )
             
             # Actualizar estadísticas acumuladas
-            if cp:
-                cp.total_energy_supplied = kwh
-                cp.total_revenue = current_amount
+            cp.total_energy_supplied = kwh
+            cp.total_revenue = current_amount
             
-            logger.debug(f"⚡ Suministro actualizado - CP: {cp_id}, Energía: {kwh:.2f}kWh, Caudal: {current_flow_rate:.1f}kW, Importe: €{current_amount:.2f}")
+            logger.info(f"⚡ Suministro ACTIVO - CP: {cp_id}, Energía: {kwh:.2f}kWh, Importe: €{current_amount:.2f}")
             
-            if driver_id and driver_id != 'ANONIMO':
-                self.send_flow_update_to_driver(
-                    driver_id=driver_id,
-                    cp_id=cp_id,
-                    flow_rate=current_flow_rate,
-                    energy_delivered=kwh,
-                    current_amount=current_amount,
-                    timestamp=timestamp
-                )
-                
         except Exception as e:
             logger.error(f"❌ Error procesando mensaje de suministro: {e}", exc_info=True)
 
@@ -1204,9 +1271,22 @@ class EVCentral:
         except Exception as e:
             logger.error(f"❌ Error enviando actualización de caudal a driver {driver_id}: {e}", exc_info=True)
 
-    def process_driver_request(self, message: dict):
-        """Procesa peticiones de suministro desde app de conductor via Kafka"""
+    def process_driver_request(self, message):
+        """Procesa peticiones de suministro desde app de conductor via Kafka - CORREGIDO"""
+        logger.info(f"🎯 process_driver_request llamado con: {message} (TIPO: {type(message)})")
         try:
+            # CORRECCIÓN: Manejar tanto diccionarios como strings
+            if isinstance(message, str):
+                try:
+                    message = json.loads(message)
+                    logger.info(f"🔄 Mensaje parseado de string a dict: {message}")
+                except json.JSONDecodeError as e:
+                    logger.error(f"❌ Error parseando mensaje string a JSON: {e}")
+                    return
+            elif not isinstance(message, dict):
+                logger.error(f"❌ Mensaje no es ni string ni diccionario: {type(message)} - {message}")
+                return
+
             driver_id = message.get('driver_id')
             cp_id = message.get('cp_id')
             request_type = message.get('type', 'SUPPLY_REQUEST')
@@ -1330,6 +1410,7 @@ class EVCentral:
         except Exception as e:
             logger.error(f"❌ Error autorizando suministro en CP {cp_id}: {e}", exc_info=True)
             return False
+
 def main():
     """Función principal"""
     
