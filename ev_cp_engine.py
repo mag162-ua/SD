@@ -9,22 +9,26 @@ import json
 import os
 from datetime import datetime
 from kafka import KafkaConsumer, KafkaProducer
-from kafka.errors import KafkaError
 
 class MENSAJES_CP_M(enum.Enum):
     STATUS_E = "STATUS_E"
-    STATUS_OK = "STATUS_OK" 
+    STATUS_OK = "STATUS_OK"
     STATUS_KO = "STATUS_KO"
-    SOL_SUMINISTRO = 'SUPPLY_APPROVE'
-    SUMINISTRAR = "SUPPLY_AUTHORIZED"
-    SUMINISTRANDO = "ENERGY_FLOW"
+    SOL_SUMINISTRO = 'SUPPLY_APPROVED'
+    SUMINISTRAR = "supply_response"
+    SUMINISTRANDO = "supply_flow"
     SOL_PARAR = 'STOP'
-    PARAR = "STOP_CONFIRMED"
+    PARAR = "stop"
     ERROR_COMM = "ERROR_COMM"
     ERROR_KAFKA = "ERROR_KAFKA"
 
 class EV_CP_E:
+
     PUERTO_BASE = 6000
+    TOPICO_ACCION = "supply_flow"
+    TOPICO_SUMINISTRO = "supply_response"
+    TOPICO_CONTROL = "control_commands"
+    TIMEOUT = 2
 
     def __init__(self, IP_PUERTO_BROKER, PUERTO):
         self.ID = None
@@ -67,35 +71,27 @@ class EV_CP_E:
                 return False
 
     def abrir_kafka(self):
-        print("Abriendo conexión Kafka REAL...")
+        print("Abriendo conexión Kafka...")
         try:
-            # CORREGIDO: Usar JSON serialization
             self.producer = KafkaProducer(
-                bootstrap_servers=[f"{self.IP_BROKER}:{self.PUERTO_BROKER}"],
-                value_serializer=lambda v: json.dumps(v).encode('utf-8'),  # CORREGIDO
-                retries=3,
-                acks='all'
+                bootstrap_servers=[f"{self.IP_BROKER}:{self.PUERTO_BROKER}"], 
+                value_serializer=lambda v: json.dumps(v).encode('utf-8')
             )
-            
-            # CORREGIDO: Consumer para control_commands (donde la central envía comandos)
             self.consumer = KafkaConsumer(
-                'control_commands',  # Topic donde escucha comandos de la central
-                bootstrap_servers=[f"{self.IP_BROKER}:{self.PUERTO_BROKER}"],
-                auto_offset_reset='latest',
-                enable_auto_commit=True,
-                group_id=f'engine_{self.ID}_group' if self.ID else 'engine_temp_group',
-                value_deserializer=lambda x: json.loads(x.decode('utf-8')),  # CORREGIDO
-                consumer_timeout_ms=1000
+                EV_CP_E.TOPICO_CONTROL, 
+                bootstrap_servers=[f"{self.IP_BROKER}:{self.PUERTO_BROKER}"], 
+                auto_offset_reset='latest', 
+                enable_auto_commit=True, 
+                group_id=f'engine_{self.ID}_group', 
+                value_deserializer=lambda x: json.loads(x.decode('utf-8')) if x else None
             )
-            
-            print("✅ Conexión Kafka REAL establecida correctamente.")
+            print("Conexión Kafka abierta correctamente.")
             return True
         
         except Exception as e:
-            print(f"❌ Error al abrir la conexión Kafka REAL: {e}")
-            if self.producer:
+            print(f"Error al abrir la conexión Kafka: {e}")
+            if (hasattr(self, 'producer') and self.producer) or (hasattr(self, 'consumer') and self.consumer): 
                 self.producer.close()
-            if self.consumer:
                 self.consumer.close()
             return False
 
@@ -106,19 +102,15 @@ class EV_CP_E:
                 conexion_monitor, self.IP_M = self.socket_monitor.accept()
                 
                 mensaje = conexion_monitor.recv(1024).decode('utf-8').strip()
-                print(f"📨 Mensaje recibido del monitor: {mensaje}")
-                
                 if mensaje:
                     if self.ID is None:
                         self.ID = mensaje.split('#')[1]
-                        print(f"🆔 ID del engine asignado: {self.ID}")
+                        print(f"ID del engine asignado: {self.ID}")
                         self.estado = MENSAJES_CP_M.STATUS_OK.value
                         self.cargar_estado()
-                    
-                    if mensaje == MENSAJES_CP_M.STATUS_E.value + f"#{self.ID}":
+                    if mensaje == MENSAJES_CP_M.STATUS_E.value+f"#{self.ID}":
                         respuesta = self.estado
                         conexion_monitor.sendall(respuesta.encode())
-                        print(f"📤 Respuesta enviada al monitor: {respuesta}")
 
             except socket.error as e:
                 if e.errno == 9:
@@ -135,125 +127,110 @@ class EV_CP_E:
                     conexion_monitor.close()
 
     def escuchar_central(self):
+        """Escucha comandos de la Central - CORREGIDO"""
         if self.consumer is None:
-            print("❌ Consumidor Kafka no está inicializado.")
+            print("Consumidor Kafka no está inicializado.")
             return
 
-        print(f"🔍 Escuchando mensajes de la central en topic 'control_commands'...")
+        print(f"🔍 Escuchando mensajes de la central en topic: {EV_CP_E.TOPICO_CONTROL}")
         
         try:
             for mensaje in self.consumer:
-                mensaje_valor = mensaje.value
-                print(f"📨 Mensaje recibido de la central: {mensaje_valor}")
-                
-                cp_id = mensaje_valor.get('cp_id')
-                command = mensaje_valor.get('command')  # Cambiado de 'type' a 'command'
-                
-                if cp_id == self.ID:
-                    if command == "START" or command == "RESUME":
-                        print("▶️ Comando de inicio recibido de la central.")
-                        if self.comprobar_si_suministrar():
-                            print("✅ Suministro iniciado por comando de la central")
-                        else:
-                            print("❌ No se pudo iniciar suministro")
-                            
-                    elif command == "STOP":
-                        print("⏹️ Comando de parada recibido de la central.")
-                        if self.comprobar_si_parar():
-                            print("✅ Suministro detenido por comando de la central")
-                        else:
-                            print("❌ No se pudo detener suministro")
-
+                try:
+                    mensaje_valor = mensaje.value
+                    print(f"📨 Mensaje recibido de la central: {mensaje_valor}")
+                    
+                    cp_id = mensaje_valor.get('cp_id')
+                    command = mensaje_valor.get('command')
+                    
+                    if cp_id == self.ID:
+                        print(f"🎯 Mensaje para este CP {self.ID}")
+                        
+                        if command == 'START':
+                            print("🚀 Comando START recibido - Iniciando suministro...")
+                            if not self.suministrar_actvio:
+                                self.iniciar_suministro()
+                                
+                        elif command == 'STOP':
+                            print("🛑 Comando STOP recibido - Deteniendo suministro...")
+                            if self.suministrar_actvio:
+                                self.detener_suministro()
+                                
+                except Exception as e:
+                    print(f"❌ Error procesando mensaje: {e}")
+                    
         except Exception as e:
-            print(f"❌ Error al escuchar la central: {e}")
+            print(f"❌ Error en escuchar_central: {e}")
 
-    def comprobar_si_suministrar(self):
-        if self.estado == MENSAJES_CP_M.STATUS_OK.value and not self.suministrar_actvio:
-            self.suministrar_actvio = True
-            self.total_kwh_suministrados = 0.0
-            self.parar_suministro.clear()
-            
-            # CORREGIDO: Enviar a supply_response con formato correcto
-            mensaje = {
-                'cp_id': self.ID, 
-                'approve': True, 
-                'reason': 'Suministro iniciado',
-                'timestamp': datetime.now().isoformat(),
-                'type': 'SUPPLY_APPROVED'
-            }
-            
-            print(f"📤 Enviando confirmación a supply_response: {mensaje}")
-            self.producer.send('supply_response', mensaje)  # CORREGIDO: Topic correcto
-            self.producer.flush()
-            
-            suministrar_thread = threading.Thread(target=self.suministrar_energia, daemon=True)
-            suministrar_thread.start()
-            return True
-        else:
-            # Enviar rechazo si no se puede iniciar
-            mensaje = {
-                'cp_id': self.ID, 
-                'approve': False, 
-                'reason': 'No se puede iniciar suministro - Estado incorrecto',
-                'timestamp': datetime.now().isoformat(),
-                'type': 'SUPPLY_REJECTED'
-            }
-            print(f"📤 Enviando rechazo a supply_response: {mensaje}")
-            self.producer.send('supply_response', mensaje)
-            self.producer.flush()
-            return False
-
-    def comprobar_si_parar(self):
+    def iniciar_suministro(self):
+        """Inicia el suministro de energía"""
         if self.suministrar_actvio:
-            # CORREGIDO: Enviar confirmación de parada
-            respuesta = {
-                'cp_id': self.ID, 
-                'approve': True, 
-                'reason': 'Parado por solicitud',
-                'timestamp': datetime.now().isoformat(),
-                'type': 'SUPPLY_STOPPED'
-            }
-            print(f"📤 Enviando confirmación de parada a supply_response: {respuesta}")
-            self.producer.send('supply_response', respuesta)
-            self.producer.flush()
-            self.parar_suministro.set()
-            return True
-        else:
-            return False
+            ########################################################NOTIFICAR CENTRAL
+            return
+            
+        self.suministrar_actvio = True
+        self.parar_suministro.clear()
+        self.total_kwh_suministrados = 0.0
+        ##########################################################NOTIFICAR A LA CENTRAL
+        # Iniciar hilo de suministro
+        suministro_thread = threading.Thread(target=self.suministrar_energia, daemon=True)
+        suministro_thread.start()
+        print("✅ Hilo de suministro iniciado")
+
+    def detener_suministro(self):
+        """Detiene el suministro de energía"""
+        if not self.suministrar_actvio:
+            #####################################################3333 NOTIFICAR CENTRAL
+            return
+        ##############################################333 CENTRAL NOTIFICAR
+        self.parar_suministro.set()
+        time.sleep(1)  # Dar tiempo al hilo para terminar
+        self.suministrar_actvio = False
+        print("✅ Suministro detenido completamente")
 
     def suministrar_energia(self):
+        """Hilo principal de suministro de energía - CORREGIDO"""
         print("⚡ Suministro de energía iniciado.")
         
         while not self.parar_suministro.is_set():
             self.total_kwh_suministrados += 0.1
-            
-            # CORREGIDO: Enviar datos de suministro a supply_flow
+            ##################################################3 GUARDAR ESTADO
+            # Enviar datos de suministro a la Central
             mensaje = {
                 'cp_id': self.ID, 
-                'driver_id': "ANONIMO", 
-                'kwh': round(self.total_kwh_suministrados, 2),
+                'driver_id': "MANUAL", 
+                'kwh': round(self.total_kwh_suministrados, 1),
                 'timestamp': datetime.now().isoformat(),
-                'type': 'ENERGY_FLOW'
+                'reason': 'SUPPLY_FLOW' ##### MENSAJE
             }
-            
-            print(f"📤 Enviando datos de suministro a supply_flow: {mensaje}")
-            self.producer.send('supply_flow', mensaje)  # CORREGIDO: Topic correcto
+            self.producer.send(EV_CP_E.TOPICO_ACCION, json.dumps(mensaje))
             self.producer.flush()
             
-            self.guardar_estado()
+            print(f"⚡ Suministrando... {self.total_kwh_suministrados:.1f}kWh")
             self.parar_suministro.wait(1)
         
-        print("🔌 Hilo de suministro detenido")
+        print("🔌 Hilo de suministro detenido y finalizado limpiamente.")
         self.suministrar_actvio = False
+        
+        # Enviar mensaje final de parada
+        mensaje_final = {
+            'cp_id': self.ID, 
+            'kwh': round(self.total_kwh_suministrados, 1), 
+            'reason': 'SUPPLY_ENDED'
+        }
+        self.producer.send(EV_CP_E.TOPICO_ACCION, json.dumps(mensaje_final))
+        self.producer.flush()
+        
+        # Resetear contadores
         self.total_kwh_suministrados = 0.0
 
-    # ... (el resto de los métodos se mantienen igual, solo cambian los prints)
     def mostrar_menu(self):
         self.espera_respuesta_menu.set()
         while True:
+
             os.system('cls' if os.name == 'nt' else 'clear')
             
-            if self.ID is None:
+            if self.ID is None :
                 print(f"{self.IP_E}:{self.PUERTO_E} A la espera de conexión con un monitor...")
             else:
                 print(f"\n--- Menú del Engine {self.ID} : {self.IP_E}:{self.PUERTO_E}---")
@@ -273,62 +250,89 @@ class EV_CP_E:
                     print(f"Total kWh suministrados hasta ahora: {self.total_kwh_suministrados:.2f} kWh")
                     print("-----------------------------------")
                 print("Seleccione una opción: ")
-                if not self.espera_respuesta_menu.is_set():
-                    response_menu_thread = threading.Thread(target=self.responder_menu, daemon=True)
-                    response_menu_thread.start()
+                response_menu_thread = threading.Thread(target=self.responder_menu, daemon=True)
+                response_menu_thread.start()
 
             time.sleep(1)
 
+            
     def responder_menu(self):
         self.espera_respuesta_menu.clear()
-        try:
-            switch = input().strip()
+        switch = input().strip()
 
-            if switch == "1":
-                estado = "🟢 ACTIVADO" if self.estado == MENSAJES_CP_M.STATUS_OK.value else "🔴 AVERIADO"
-                print(f"Estado actual: {estado}, Suministro activo: {self.suministrar_actvio}, Total kWh suministrados: {self.total_kwh_suministrados:.2f} kWh")
-            
-            elif switch == "2":
-                if self.estado == MENSAJES_CP_M.STATUS_OK.value:
-                    print(f"🔴 CP {self.ID} averiado")
-                    self.estado = MENSAJES_CP_M.STATUS_KO.value
-                else:
-                    print(f"🟢 CP {self.ID} reparado")
-                    self.estado = MENSAJES_CP_M.STATUS_OK.value
-
-            elif switch == "3":
+        if switch == "1":
+            estado = ""
+            if self.estado == MENSAJES_CP_M.STATUS_OK.value:
+                estado = "🟢 ACTIVADO"
+            else:
+                estado = "🔴 AVERIADO"
+            print(f"Estado actual: {estado}, Suministro activo: {self.suministrar_actvio}, Total kWh suministrados: {self.total_kwh_suministrados:.2f} kWh")
+        
+        elif switch == "2":
+            if self.estado == MENSAJES_CP_M.STATUS_OK.value:
+                print(f"CP {self.ID} averiado")
+                self.estado = MENSAJES_CP_M.STATUS_KO.value
+                # Si está suministrando, parar
                 if self.suministrar_actvio:
-                    if self.comprobar_si_parar():
-                        print("⏹️ DETENIENDO EL SUMINISTRO: El punto de carga terminará de suministrar")
-                    else:
-                        print("❌ Error deteniendo suministro")
-                else:
-                    if not self.comprobar_si_suministrar():
-                        print("❌ IMPOSIBLE_SUMINISTRAR: El punto de carga se encuentra averiado")
+                    self.detener_suministro()
+            else:
+                print(f"CP {self.ID} reparado")
+                self.estado = MENSAJES_CP_M.STATUS_OK.value
 
-            elif switch == "4":
-                if self.total_kwh_suministrados != 0.0:
-                    self.guardar_estado()
-                if self.producer:
-                    self.producer.close()
-                if self.consumer:
-                    self.consumer.close()
-                if self.socket_monitor:
-                    self.socket_monitor.close()
-                print("🔴 CERRANDO SISTEMA")
-                os._exit(0)
-            elif switch:
-                print("❌ Comando desconocido")
-            
-        except Exception as e:
-            print(f"❌ Error en menú: {e}")
-        finally:
-            self.espera_respuesta_menu.set()
+        elif switch == "3":
+            if self.estado == MENSAJES_CP_M.STATUS_OK.value and not self.suministrar_actvio:
+                # SOLICITAR INICIO de suministro a la Central
+                print("🚀 Solicitando inicio de suministro a la central...")
+                mensaje_inicio = {
+                    'cp_id': self.ID,
+                    'type': 'SUPPLY_REQUEST',
+                    'driver_id': 'MANUAL_ENGINE',
+                    'timestamp': datetime.now().isoformat(),
+                    'reason': 'MANUAL_START'
+                }
+                self.producer.send(EV_CP_E.TOPICO_SUMINISTRO, json.dumps(mensaje_inicio))
+                self.producer.flush()
+                print("✅ Solicitud de inicio enviada a la central")
+                
+            elif self.estado == MENSAJES_CP_M.STATUS_OK.value and self.suministrar_actvio:
+                # DETENER suministro - ENVIAR MENSAJE DE STOP CORRECTO
+                print("🛑 Enviando solicitud de PARADA a la central...")
+                mensaje_stop = {
+                    'cp_id': self.ID,
+                    'type': 'STOP_SUPPLY',
+                    'reason': 'MANUAL_STOP_ENGINE',
+                    'timestamp': datetime.now().isoformat()
+                }
+                self.producer.send(EV_CP_E.TOPICO_SUMINISTRO, json.dumps(mensaje_stop))
+                self.producer.flush()
+                
+                # También parar localmente el hilo de suministro
+                self.detener_suministro()
+                print("✅ Solicitud de parada enviada a la central y suministro detenido localmente")
+                
+            else:
+                print("IMPOSIBLE_SUMINISTRAR: El punto de carga se encuentra averiado")
+
+        elif switch == "4":
+            if self.total_kwh_suministrados != 0.0:
+                self.guardar_estado()
+            if self.producer:
+                self.producer.close()
+            if self.consumer:
+                self.consumer.close()
+            if self.socket_monitor:
+                self.socket_monitor.close()
+            print("CERRADA DE SISTEMA")
+            os._exit(0)
+        elif switch:
+            print("Comando desconocido")
+        
+        self.espera_respuesta_menu.set()
 
     def run(self):
-        print("🚀 Engine corriendo...")
+        print("Engine corriendo...")
         if self.abrir_socket() and self.abrir_kafka():
-            print("✅ Monitor y Kafka iniciados correctamente")
+            print("Monitor abierto correctamente.")
 
             listener_thread_m = threading.Thread(target=self.escuchar_monitor, daemon=True)
             listener_thread_m.start()
@@ -345,7 +349,7 @@ class EV_CP_E:
         }
         with open(f"estado_engine_{self.ID}.json", "w") as archivo:
             json.dump(estado_info, archivo, indent=4)
-        print(f"💾 Estado del engine guardado en estado_engine_{self.ID}.json")
+        print(f"Estado del engine guardado en estado_engine_{self.ID}.json")
 
     def cargar_estado(self):
         if os.path.exists(f"estado_engine_{self.ID}.json"):
@@ -355,17 +359,17 @@ class EV_CP_E:
                     self.total_kwh_suministrados = estado_info.get("Total_kWh_Suministrados", 0.0)
                     self.parar_suministro.clear()
                     self.suministrar_actvio = True
-                    print(f"📂 Estado del engine cargado: Total kWh suministrados = {self.total_kwh_suministrados} kWh")
+                    print(f"Estado del engine cargado: Total kWh suministrados = {self.total_kwh_suministrados} kWh")
                     suministrar_thread = threading.Thread(target=self.suministrar_energia, daemon=True)
                     suministrar_thread.start()
                     os.remove(f"estado_engine_{self.ID}.json")
             except Exception as e:
-                print(f"❌ [ERROR RESILIENCIA] Error al cargar el estado: {e}. Iniciando desde 0.")
+                print(f"[ERROR RESILIENCIA] Error al cargar el estado: {e}. Iniciando desde 0.")
                 self.total_kwh_suministrados = 0.0
-
+    
 if __name__ == "__main__":
     if len(sys.argv) < 2 or len(sys.argv) > 3:
-        print("Uso: python ev_cp_engine.py <IP_BROKER:PUERTO_BROKER> <PUERTO_ENGINE/OPCIONAL>")
+        print("Uso: python ev_cp_monitor.py <IP_BROKER:PUERTO_BROKER> <PUERTO_ENGINE/OPCIONAL>")
         sys.exit(1)
     
     puerto_engine = int(sys.argv[2]) if len(sys.argv) == 3 else EV_CP_E.PUERTO_BASE
@@ -374,7 +378,7 @@ if __name__ == "__main__":
     try:
         engine.run()
     except KeyboardInterrupt:
-        print("🔴 Engine detenido. Ctrl+C detectado. Saliendo...")
+        print("Engine detenido. Ctrl+C detectado. Saliendo...")
         if engine.total_kwh_suministrados != 0.0:
             engine.guardar_estado()
         if engine.producer:
