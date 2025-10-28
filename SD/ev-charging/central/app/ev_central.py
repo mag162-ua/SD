@@ -527,8 +527,10 @@ class SocketServer:
         location = params[1]
         price = float(params[2])
         
-        # Verificar si el CP ya existe ANTES de crearlo
-        if self.central.database.cp_exists(cp_id):
+        # ================================================================
+        # 🎯 CORRECCIÓN: Condición lógica corregida - usar 'and' en lugar de 'or'
+        # ================================================================
+        if self.central.database.cp_exists(cp_id) and self.central.database.get_charging_point(cp_id).status not in ["AVERIADO", "DESCONECTADO"]:
             logger.warning(f"⚠️ Intento de registrar CP duplicado via socket: {cp_id}")
             response = f"ERROR#CP_ya_registrado#{cp_id}"
             client_socket.send(response.encode('utf-8'))
@@ -948,27 +950,116 @@ class EVCentral:
             self.kafka_manager.send_message('central_updates', cp.parse())
             logger.info(f"🔄 Estado actualizado - CP: {cp_id}, Estado: {status}")
     
-    def record_transaction(self, cp: ChargingPoint, status: str):
-        """Registra una transacción completada"""
+    # ================================================================
+    # 🎯 NUEVO: Método mejorado para registrar transacciones con tickets
+    # ================================================================
+    def record_transaction(self, cp: ChargingPoint, status: str) -> dict:
+        """Registra una transacción completada y retorna los datos"""
+        transaction_id = f"TXN{int(time.time())}"
         transaction = {
-            'transaction_id': f"TXN{int(time.time())}",
+            'transaction_id': transaction_id,
             'cp_id': cp.cp_id,
             'driver_id': cp.driver_id,
-            'energy_consumed': cp.current_consumption,
-            'amount': cp.current_amount,
+            'energy_consumed': cp.total_energy_supplied,
+            'amount': cp.total_revenue,
             'price_per_kwh': cp.price_per_kwh,
             'status': status,
             'start_time': cp.last_heartbeat.isoformat() if cp.last_heartbeat else datetime.now().isoformat(),
-            'end_time': datetime.now().isoformat()
+            'end_time': datetime.now().isoformat(),
+            'location': cp.location
         }
         
         self.database.add_transaction(transaction)
-        logger.info(f"💰 Transacción registrada: {transaction['transaction_id']}")
+        logger.info(f"💰 Transacción registrada: {transaction_id}")
+        
+        return transaction
 
+    # ================================================================
+    # 🎯 NUEVO: Método para enviar tickets al driver
+    # ================================================================
+    def send_ticket_to_driver(self, cp: ChargingPoint, transaction_data: dict):
+        """Envía ticket de transacción al conductor"""
+        try:
+            if not cp.driver_id:
+                logger.warning(f"⚠️ No hay driver_id para enviar ticket del CP {cp.cp_id}")
+                return
+                
+            ticket_message = {
+                'type': 'TRANSACTION_TICKET',
+                'ticket_id': transaction_data['transaction_id'],
+                'driver_id': cp.driver_id,
+                'cp_id': cp.cp_id,
+                'location': cp.location,
+                'energy_consumed_kwh': round(transaction_data['energy_consumed'], 2),
+                'total_amount_eur': round(transaction_data['amount'], 2),
+                'price_per_kwh': cp.price_per_kwh,
+                'start_time': transaction_data['start_time'],
+                'end_time': transaction_data['end_time'],
+                'duration_minutes': self.calculate_duration_minutes(
+                    transaction_data['start_time'], 
+                    transaction_data['end_time']
+                ),
+                'status': 'COMPLETED',
+                'timestamp': datetime.now().isoformat()
+            }
+            
+            self.kafka_manager.send_message('driver_tickets', ticket_message)
+            logger.info(f"🎫 Ticket enviado a driver {cp.driver_id} - Transacción: {transaction_data['transaction_id']}")
+            
+        except Exception as e:
+            logger.error(f"❌ Error enviando ticket a driver {cp.driver_id}: {e}", exc_info=True)
+
+    # ================================================================
+    # 🎯 NUEVO: Método para enviar tickets al engine
+    # ================================================================
+    def send_ticket_to_engine(self, cp: ChargingPoint, transaction_data: dict):
+        """Envía ticket de transacción al engine"""
+        try:
+            ticket_message = {
+                'type': 'TRANSACTION_TICKET',
+                'ticket_id': transaction_data['transaction_id'],
+                'cp_id': cp.cp_id,
+                'energy_consumed_kwh': round(transaction_data['energy_consumed'], 2),
+                'total_amount_eur': round(transaction_data['amount'], 2),
+                'price_per_kwh': cp.price_per_kwh,
+                'start_time': transaction_data['start_time'],
+                'end_time': transaction_data['end_time'],
+                'duration_minutes': self.calculate_duration_minutes(
+                    transaction_data['start_time'], 
+                    transaction_data['end_time']
+                ),
+                'status': 'COMPLETED',
+                'timestamp': datetime.now().isoformat()
+            }
+            
+            self.kafka_manager.send_message('engine_tickets', ticket_message)
+            logger.info(f"🎫 Ticket enviado a engine {cp.cp_id} - Transacción: {transaction_data['transaction_id']}")
+            
+        except Exception as e:
+            logger.error(f"❌ Error enviando ticket a engine {cp.cp_id}: {e}", exc_info=True)
+
+    # ================================================================
+    # 🎯 NUEVO: Método auxiliar para calcular duración
+    # ================================================================
+    def calculate_duration_minutes(self, start_time_str: str, end_time_str: str) -> float:
+        """Calcula la duración en minutos entre dos timestamps"""
+        try:
+            start_time = datetime.fromisoformat(start_time_str)
+            end_time = datetime.fromisoformat(end_time_str)
+            duration = end_time - start_time
+            return round(duration.total_seconds() / 60, 2)
+        except Exception as e:
+            logger.error(f"❌ Error calculando duración: {e}")
+            return 0.0
+
+    # ================================================================
+    # 🎯 MODIFICADO: Método mejorado para transacciones fallidas con tickets
+    # ================================================================
     def record_failed_transaction(self, cp: ChargingPoint, failure_reason: str, driver_id: str):
-        """Registra una transacción fallida por avería"""
+        """Registra una transacción fallida por avería y envía tickets"""
+        transaction_id = f"TXN_FAIL_{int(time.time())}"
         transaction = {
-            'transaction_id': f"TXN_FAIL_{int(time.time())}",
+            'transaction_id': transaction_id,
             'cp_id': cp.cp_id,
             'driver_id': driver_id,
             'energy_consumed': cp.current_consumption,
@@ -977,11 +1068,18 @@ class EVCentral:
             'status': 'FAILED',
             'failure_reason': failure_reason,
             'start_time': cp.last_heartbeat.isoformat() if cp.last_heartbeat else datetime.now().isoformat(),
-            'end_time': datetime.now().isoformat()
+            'end_time': datetime.now().isoformat(),
+            'location': cp.location
         }
         
         self.database.add_transaction(transaction)
-        logger.info(f"❌ Transacción fallida registrada: {transaction['transaction_id']} - Razón: {failure_reason}")
+        logger.info(f"❌ Transacción fallida registrada: {transaction_id} - Razón: {failure_reason}")
+        
+        # Enviar tickets de transacción fallida
+        if driver_id:
+            self.send_failed_ticket_to_driver(cp, transaction, failure_reason)
+        self.send_failed_ticket_to_engine(cp, transaction, failure_reason)
+        
         self.update_cp_status(
             cp_id=cp.cp_id,
             status="AVERIADO",
@@ -989,6 +1087,38 @@ class EVCentral:
             amount=0.0,
             driver_id=None
         )
+
+    # ================================================================
+    # 🎯 NUEVO: Método para tickets fallidos al driver
+    # ================================================================
+    def send_failed_ticket_to_driver(self, cp: ChargingPoint, transaction_data: dict, failure_reason: str):
+        """Envía ticket de transacción fallida al conductor"""
+        try:
+            ticket_message = {
+                'type': 'TRANSACTION_TICKET',
+                'ticket_id': transaction_data['transaction_id'],
+                'driver_id': cp.driver_id,
+                'cp_id': cp.cp_id,
+                'location': cp.location,
+                'energy_consumed_kwh': round(transaction_data['energy_consumed'], 2),
+                'total_amount_eur': round(transaction_data['amount'], 2),
+                'price_per_kwh': cp.price_per_kwh,
+                'start_time': transaction_data['start_time'],
+                'end_time': transaction_data['end_time'],
+                'duration_minutes': self.calculate_duration_minutes(
+                    transaction_data['start_time'], 
+                    transaction_data['end_time']
+                ),
+                'status': 'FAILED',
+                'failure_reason': failure_reason,
+                'timestamp': datetime.now().isoformat()
+            }
+            
+            self.kafka_manager.send_message('driver_tickets', ticket_message)
+            logger.info(f"🎫 Ticket FALLIDO enviado a driver {cp.driver_id}")
+            
+        except Exception as e:
+            logger.error(f"❌ Error enviando ticket fallido a driver: {e}")
     
     def send_control_command(self, cp_id: str, command: str):
         """Envía comandos de control a CPs via Kafka - MEJORADO"""
@@ -1052,8 +1182,10 @@ class EVCentral:
                 loop_count += 1
                 logger.info(f"🔄 DENTRO DEL WHILE - Ciclo #{loop_count}")
                 
-                # Verificar todos los topics UNO POR UNO con logs detallados
-                topics_to_check = ['driver_requests', 'supply_flow', 'supply_response', 'control_commands']
+                # ================================================================
+                # 🎯 MODIFICADO: Agregar nuevos topics para tickets
+                # ================================================================
+                topics_to_check = ['driver_requests', 'supply_flow', 'supply_response', 'control_commands', 'driver_tickets', 'engine_tickets']
                 
                 for topic in topics_to_check:
                     try:
@@ -1074,6 +1206,7 @@ class EVCentral:
                                         self.process_supply_flow(message_content)
                                     elif topic == 'driver_requests':
                                         self.process_driver_request(message_content)
+                                    # Los topics driver_tickets y engine_tickets son para enviar, no recibir
                                 except Exception as e:
                                     logger.error(f"❌ Error procesando mensaje en {topic}: {e}")
                         
@@ -1094,8 +1227,11 @@ class EVCentral:
         
         logger.info("🛑 Kafka consumer loop detenido")
 
+    # ================================================================
+    # 🎯 MODIFICADO: Procesar supply_response con manejo de STOP_SUPPLY y tickets
+    # ================================================================
     def process_supply_response(self, message):
-        """Procesa respuestas de suministro desde el Engine - CORREGIDO"""
+        """Procesa respuestas de suministro desde el Engine - CON TICKETS"""
         logger.info(f"🎯 process_supply_response llamado con: {message} (TIPO: {type(message)})")
         try:
             # Manejar tanto diccionarios como strings
@@ -1112,7 +1248,7 @@ class EVCentral:
 
             # Ahora message debería ser un diccionario
             cp_id = message.get('cp_id')
-            message_type = message.get('type')  # Cambiado de 'approve' a 'type'
+            message_type = message.get('type')
             reason = message.get('reason', 'No especificado')
 
             if not cp_id:
@@ -1127,7 +1263,7 @@ class EVCentral:
             # CORRECCIÓN: Manejar los tipos de mensaje del Engine
             if message_type == 'SUPPLY_REQUEST':
                 # El Engine solicita iniciar suministro
-                if cp.status == "ACTIVADO":
+                if cp.status == "ACTIVADO" or cp.status == "SUMINISTRANDO":
                     # Autorizar suministro
                     driver_id = message.get('driver_id', 'MANUAL_ENGINE')
                     
@@ -1149,22 +1285,34 @@ class EVCentral:
                         driver_id=driver_id
                     )
                 else:
-                    logger.warning(f"❌ CP {cp_id} no está ACTIVADO - Estado actual: {cp.status}")
+                    logger.warning(f"❌ CP {cp_id} no está ACTIVADO o SUMINISTRANDO - Estado actual: {cp.status}")
                     
             elif message_type == 'STOP_SUPPLY':
-                # El Engine solicita parar suministro
+                # ================================================================
+                # 🎯 NUEVO: El Engine solicita parar suministro - GENERAR TICKETS
+                # ================================================================
                 if cp.status == "SUMINISTRANDO":
-                    # Enviar comando STOP al Engine
+                    # 1. Registrar transacción completada
+                    transaction_data = self.record_transaction(cp, "COMPLETED")
+                    
+                    # 2. Enviar ticket al Driver
+                    self.send_ticket_to_driver(cp, transaction_data)
+                    
+                    # 3. Enviar ticket al Engine
+                    self.send_ticket_to_engine(cp, transaction_data)
+                    
+                    # 4. Enviar comando STOP al Engine (confirmación)
                     control_message = {
                         'cp_id': cp_id,
                         'command': 'STOP',
                         'timestamp': datetime.now().isoformat(),
-                        'source': 'central'
+                        'source': 'central',
+                        'transaction_id': transaction_data['transaction_id']
                     }
                     self.kafka_manager.send_message('control_commands', control_message)
-                    logger.info(f"🛑 Suministro DETENIDO para CP {cp_id} - Comando STOP enviado")
+                    logger.info(f"🛑 Suministro DETENIDO para CP {cp_id} - Ticket enviado")
                     
-                    # Actualizar estado local
+                    # 5. Actualizar estado local
                     self.update_cp_status(cp_id, "ACTIVADO")
                 else:
                     logger.info(f"ℹ️ CP {cp_id} ya estaba detenido - Estado: {cp.status}")
