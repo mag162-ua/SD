@@ -266,14 +266,23 @@ class DatabaseManager:
     
     def add_charging_point(self, cp: ChargingPoint) -> bool:
         """Añade un punto de carga Y guarda automáticamente. Retorna True si fue exitoso."""
-        # Verificar si el CP ya existe
-        if cp.cp_id in self.charging_points:
-            existing_cp = self.charging_points[cp.cp_id]
-            logger.warning(f"⚠️ Intento de registrar CP duplicado: {cp.cp_id} - "
-                          f"Estado actual: {existing_cp.status}, "
-                          f"Ubicación: {existing_cp.location}")
-            return False
+        # CORRECCIÓN: Verificar si el CP ya existe
+        existing_cp = self.charging_points.get(cp.cp_id)
         
+        if existing_cp:
+            # PERMITIR reemplazo SOLO si está DESCONECTADO
+            if existing_cp.status == "DESCONECTADO":
+                logger.info(f"🔄 Reemplazando CP {cp.cp_id} en estado DESCONECTADO")
+                self.charging_points[cp.cp_id] = cp
+                self.save_data()
+                return True
+            else:
+                # NO permitir si está en cualquier otro estado
+                logger.warning(f"🚫 Intento de registrar CP duplicado: {cp.cp_id} - "
+                            f"Estado actual: {existing_cp.status}")
+                return False
+        
+        # Si no existe o está DESCONECTADO, añadir normalmente
         self.charging_points[cp.cp_id] = cp
         logger.info(f"➕ Punto de carga {cp.cp_id} registrado - Ubicación: {cp.location}, Precio: €{cp.price_per_kwh}/kWh")
         self.save_data()
@@ -296,9 +305,22 @@ class DatabaseManager:
         self.save_data()
     
     def add_transaction(self, transaction_data: dict):
-        """Añade una transacción al historial"""
-        transaction_data['timestamp'] = datetime.now().isoformat()
-        self.transactions.append(transaction_data)
+        """Añade una transacción al historial - CON VERIFICACIÓN DE DUPLICADOS"""
+        try:
+            # Verificar duplicados por transaction_id
+            existing_ids = {t.get('transaction_id') for t in self.transactions}
+            if transaction_data.get('transaction_id') in existing_ids:
+                logger.warning(f"⚠️ Transacción duplicada detectada: {transaction_data.get('transaction_id')}")
+                return False
+            
+            transaction_data['timestamp'] = datetime.now().isoformat()
+            self.transactions.append(transaction_data)
+            logger.debug(f"📝 Transacción añadida: {transaction_data.get('transaction_id')}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Error añadiendo transacción: {e}")
+            return False
     
     def backup_data(self, backup_file: str = None):
         """Crea una copia de seguridad de los datos"""
@@ -332,7 +354,7 @@ class RealKafkaManager:
         self.consumers = {}
         
         try:
-            # Inicializar producer
+            # VOLVER a la configuración ORIGINAL sin keys
             self.producer = KafkaProducer(
                 bootstrap_servers=[self.bootstrap_servers],
                 value_serializer=lambda v: json.dumps(v).encode('utf-8'),
@@ -347,7 +369,7 @@ class RealKafkaManager:
             raise
     
     def send_message(self, topic: str, message: dict):
-        """Envía mensaje a topic real de Kafka"""
+        """Envía mensaje a topic real de Kafka - VERSIÓN ORIGINAL"""
         try:
             if self.producer:
                 future = self.producer.send(topic, message)
@@ -516,7 +538,7 @@ class SocketServer:
             logger.error(f"❌ Error procesando mensaje: {e}", exc_info=True)
     
     def handle_cp_registration(self, params: List[str], client_socket):
-        """Maneja registro de puntos de carga"""
+        """Maneja registro de puntos de carga - ENVIAR SOLO REGISTER_OK"""
         if len(params) < 3:
             logger.error("❌ Parámetros insuficientes para registro")
             response = "ERROR#Parámetros_insuficientes"
@@ -527,36 +549,59 @@ class SocketServer:
         location = params[1]
         price = float(params[2])
         
-        # ================================================================
-        # 🎯 CORRECCIÓN: Condición lógica corregida - usar 'and' en lugar de 'or'
-        # ================================================================
-        if self.central.database.cp_exists(cp_id) and self.central.database.get_charging_point(cp_id).status not in ["AVERIADO", "DESCONECTADO"]:
-            logger.warning(f"⚠️ Intento de registrar CP duplicado via socket: {cp_id}")
-            response = f"ERROR#CP_ya_registrado#{cp_id}"
-            client_socket.send(response.encode('utf-8'))
-            return
+        # Verificar si el CP ya existe
+        existing_cp = self.central.database.get_charging_point(cp_id)
         
+        if existing_cp:
+            # PERMITIR reconexión SOLO si el CP está DESCONECTADO
+            if existing_cp.status == "DESCONECTADO":
+                logger.info(f"🔄 CP {cp_id} reconectando - Estado anterior: DESCONECTADO")
+                
+                # Actualizar datos del CP existente
+                existing_cp.location = location
+                existing_cp.price_per_kwh = price
+                existing_cp.socket_connection = client_socket
+                existing_cp.last_heartbeat = datetime.now()
+                existing_cp.status = "ACTIVADO"  # Cambiar a ACTIVADO al reconectar
+                
+                # Guardar cambios
+                self.central.database.save_data()
+                
+                # CORRECCIÓN: Enviar solo "REGISTER_OK" sin sufijos
+                response = "REGISTER_OK"
+                client_socket.send(response.encode('utf-8'))
+                logger.info(f"✅ CP {cp_id} reconectado correctamente")
+                return
+                
+            else:
+                # NO permitir reconexión si el CP está en CUALQUIER OTRO estado
+                logger.warning(f"🚫 CP {cp_id} ya registrado - Estado actual: {existing_cp.status} - No se permite reconexión")
+                response = f"ERROR#CP_ya_registrado#{cp_id}#Estado:{existing_cp.status}"
+                client_socket.send(response.encode('utf-8'))
+                return
+        
+        # Si no existe, crear nuevo CP
         cp = ChargingPoint(cp_id, location, price)
         cp.socket_connection = client_socket
         cp.last_heartbeat = datetime.now()
+        cp.status = "ACTIVADO"  # Estado inicial al registrar
         
-        # Intentar agregar el CP (con validación duplicada por seguridad)
         if self.central.database.add_charging_point(cp):
-            self.central.update_cp_status(cp_id, "DESCONECTADO")
+            # CORRECCIÓN: Enviar solo "REGISTER_OK" sin sufijos
             response = "REGISTER_OK"
             client_socket.send(response.encode('utf-8'))
             logger.info(f"✅ Punto de carga {cp_id} registrado correctamente via socket")
         else:
-            # Esto no debería pasar porque ya verificamos, pero por seguridad
             response = f"ERROR#CP_ya_registrado#{cp_id}"
             client_socket.send(response.encode('utf-8'))
             logger.error(f"❌ Error inesperado registrando CP {cp_id}")
     
     def handle_cp_ok(self, params: List[str], client_socket):
-        """Maneja ok de puntos de carga y envía confirmación"""
+        """Maneja ok de puntos de carga - ENVIAR RESPUESTAS SIMPLES"""
         if params:
             cp_id = params[0]
             cp = self.central.database.get_charging_point(cp_id)
+            
             if not cp:
                 logger.warning(f"⚠️ CP {cp_id} no registrado - Solicitando registro")
                 response = f"ERROR#CP_no_registrado#SOLICITAR_REGISTRO#{cp_id}"
@@ -565,33 +610,29 @@ class SocketServer:
                 return
                 
             if cp:
+                # Actualizar conexión socket y heartbeat
+                cp.socket_connection = client_socket
                 cp.last_heartbeat = datetime.now()
             
                 status_changed = False
-                if cp.status == "DESCONECTADO":
+                # SOLO cambiar estado si estaba DESCONECTADO
+                if cp.status == "DESCONECTADO" or cp.status == "AVERIADO":
                     self.central.update_cp_status(cp_id, "ACTIVADO")
                     logger.info(f"🔄 CP {cp_id} reactivado - Estado cambiado a ACTIVADO")
                     status_changed = True
-                elif cp.status == "AVERIADO":
-                    self.central.update_cp_status(cp_id, "ACTIVADO")
-                    logger.info(f"🔄 CP {cp_id} reactivado - Estado anterior AVERIADO cambiado a ACTIVADO")
-                    status_changed = True
                 
-                response = f"CP_OK_ACK#{cp_id}"
-                if status_changed:
-                    response += "#ESTADO_ACTUALIZADO"
-                
+                # CORRECCIÓN: Enviar respuesta simple
+                response = "CP_OK_ACK"
                 client_socket.send(response.encode('utf-8'))
                 logger.debug(f"💓 Heartbeat recibido de {cp_id} - Confirmación enviada")
                 
             else:
-                # CP no encontrado - enviar error
-                response = f"ERROR#CP_no_encontrado#{cp_id}"
+                response = f"ERROR#CP_no_encontrado"
                 client_socket.send(response.encode('utf-8'))
                 logger.error(f"❌ CP {cp_id} no encontrado para mensaje CP_OK")
 
     def handle_cp_failure(self, params: List[str], client_socket):
-        """Maneja mensajes de avería CP_KO"""
+        """Maneja mensajes de avería CP_KO - CON PARADA DE SUMINISTRO"""
         if not params:
             logger.error("❌ Parámetros insuficientes para mensaje CP_KO")
             return
@@ -606,16 +647,31 @@ class SocketServer:
             was_supplying = cp.status == "SUMINISTRANDO"
             driver_id = cp.driver_id
             
-            self.central.update_cp_status(cp_id, "AVERIADO")
-            
-            if was_supplying and driver_id:
+            # CORRECCIÓN: Enviar comando STOP si estaba suministrando
+            if was_supplying:
+                logger.info(f"🛑 Enviando comando STOP a CP {cp_id} por avería")
+                
+                # Enviar comando STOP via Kafka
+                control_message = {
+                    'cp_id': cp_id,
+                    'command': 'STOP',
+                    'reason': f'AVERIA_CP: {reason}',
+                    'timestamp': datetime.now().isoformat(),
+                    'source': 'central'
+                }
+                self.central.kafka_manager.send_message('control_commands', control_message)
+                
+                # Registrar transacción fallida
                 self.central.record_failed_transaction(cp, reason, driver_id)
                 logger.info(f"🔌 Suministro interrumpido para conductor {driver_id} por avería en CP {cp_id}")
+            
+            # Actualizar estado a AVERIADO
+            self.central.update_cp_status(cp_id, "AVERIADO")
             
             response = f"CP_KO_ACK#{cp_id}"
             client_socket.send(response.encode('utf-8'))
             
-            logger.info(f"🔴 CP {cp_id} puesto en estado AVERIADO")
+            logger.info(f"🔴 CP {cp_id} puesto en estado AVERIADO y suministro detenido")
         else:
             logger.error(f"❌ CP {cp_id} no encontrado para mensaje CP_KO")
             response = f"ERROR#CP_no_encontrado"
@@ -924,120 +980,193 @@ class EVCentral:
                             logger.debug(f"🟠 CP {cp.cp_id} está PARADO intencionalmente - Ignorando falta de heartbeat")
     
     def update_cp_status(self, cp_id: str, status: str, consumption: float = 0.0, 
-                        amount: float = 0.0, driver_id: str = None):
-        """Actualiza el estado de un punto de carga"""
+                    amount: float = 0.0, driver_id: str = None):
+        """Actualiza el estado de un punto de carga - CON DEBUG COMPLETO"""
         cp = self.database.get_charging_point(cp_id)
-        if cp:
-            if status == "AVERIADO" and cp.status == "SUMINISTRANDO":
-                affected_driver = cp.driver_id
-                cp.current_consumption = 0.0
-                cp.current_amount = 0.0
-                cp.driver_id = None
-                logger.warning(f"🔌 Suministro cortado para conductor {affected_driver} - CP {cp_id} en avería")
+        if not cp:
+            logger.error(f"❌ CP {cp_id} no encontrado en update_cp_status")
+            return
             
-            elif cp.status == "SUMINISTRANDO" and status != "SUMINISTRANDO" and status != "AVERIADO" and cp.current_amount > 0:
-                self.record_transaction(cp, "COMPLETED")
+        previous_status = cp.status
+        logger.info(f"🔍 DEBUG update_cp_status INICIO")
+        logger.info(f"🔍 CP: {cp_id}, Estado anterior: '{previous_status}', Nuevo estado: '{status}'")
+        logger.info(f"🔍 Consumo: {consumption}, Importe: {amount}, Driver: {driver_id}")
+        
+        # Verificar si realmente hay un cambio de estado
+        if previous_status == status:
+            logger.info(f"🔍 Mismo estado, no hay cambio necesario")
+            return
+
+        transaction_data = None
+        
+        # Lógica para transacciones cuando termina un suministro
+        if previous_status == "SUMINISTRANDO" and status != "SUMINISTRANDO" and status != "AVERIADO":
+            logger.info(f"🔍 Finalizando suministro - registrando transacción")
+            if cp.current_amount > 0.01:
+                transaction_data = self.record_transaction(cp, "COMPLETED")
+                if transaction_data:
+                    logger.info(f"💰 Transacción registrada para CP {cp_id}")
+                    
+                    if cp.driver_id and cp.driver_id != "MANUAL":
+                        self.send_ticket_to_driver(transaction_data)
+                    else:
+                        self.send_ticket_to_engine(cp_id, transaction_data)
+            else:
+                logger.info(f"🔍 Sin importe significativo, no se registra transacción")
+        
+        # Manejo específico para averías
+        if status == "AVERIADO" and previous_status == "SUMINISTRANDO":
+            logger.info(f"🔍 Avería durante suministro - registrando transacción fallida")
+            affected_driver = cp.driver_id
+            if affected_driver and cp.current_amount > 0:
+                self.record_failed_transaction(cp, "Avería del punto de carga", affected_driver)
             
-            cp.status = status
-            cp.current_consumption = consumption
-            cp.current_amount = amount
+            cp.current_consumption = 0.0
+            cp.current_amount = 0.0
+            cp.driver_id = None
+        
+        # ACTUALIZAR ESTADO - ESTO ES LO MÁS IMPORTANTE
+        logger.info(f"🔍 Aplicando cambio de estado: '{previous_status}' -> '{status}'")
+        cp.status = status
+        cp.current_consumption = consumption
+        cp.current_amount = amount
+        
+        if driver_id:
             cp.driver_id = driver_id
-            
-            if status == "SUMINISTRANDO" and consumption > 0:
-                cp.total_energy_supplied += consumption / 3600
-                cp.total_revenue += amount
-            
-            self.kafka_manager.send_message('central_updates', cp.parse())
-            logger.info(f"🔄 Estado actualizado - CP: {cp_id}, Estado: {status}")
-    
+        
+        # Actualizar estadísticas solo si está suministrando
+        if status == "SUMINISTRANDO" and consumption > 0:
+            energy_increment = consumption / 3600
+            cp.total_energy_supplied += energy_increment
+            cp.total_revenue += amount
+        
+        # Guardar los cambios en la base de datos
+        logger.info(f"🔍 Guardando cambios en base de datos...")
+        self.database.save_data()
+        
+        # Enviar actualización via Kafka
+        logger.info(f"🔍 Enviando actualización via Kafka...")
+        self.kafka_manager.send_message('central_updates', cp.parse())
+        
+        logger.info(f"✅ Estado actualizado - CP: {cp_id}, Estado: {cp.status}")
+        logger.info(f"🔍 DEBUG update_cp_status FIN - Estado verificado: '{cp.status}'")
+        
     # ================================================================
     # 🎯 NUEVO: Método mejorado para registrar transacciones con tickets
     # ================================================================
-    def record_transaction(self, cp: ChargingPoint, status: str) -> dict:
-        """Registra una transacción completada y retorna los datos"""
-        transaction_id = f"TXN{int(time.time())}"
-        transaction = {
-            'transaction_id': transaction_id,
-            'cp_id': cp.cp_id,
-            'driver_id': cp.driver_id,
-            'energy_consumed': cp.total_energy_supplied,
-            'amount': cp.total_revenue,
-            'price_per_kwh': cp.price_per_kwh,
-            'status': status,
-            'start_time': cp.last_heartbeat.isoformat() if cp.last_heartbeat else datetime.now().isoformat(),
-            'end_time': datetime.now().isoformat(),
-            'location': cp.location
-        }
-        
-        self.database.add_transaction(transaction)
-        logger.info(f"💰 Transacción registrada: {transaction_id}")
-        
-        return transaction
+    def record_transaction(self, cp: ChargingPoint, status: str):
+        """Registra una transacción completada - RETORNA datos de transacción"""
+        try:
+            # Generar ID único basado en timestamp y CP
+            transaction_id = f"TXN{int(time.time())}_{cp.cp_id}"
+            
+            # Verificar si ya existe una transacción reciente para este CP
+            recent_transactions = [
+                t for t in self.database.transactions 
+                if t.get('cp_id') == cp.cp_id and 
+                (time.time() - datetime.fromisoformat(t.get('timestamp', datetime.now().isoformat())).timestamp()) < 5
+            ]
+            
+            if recent_transactions:
+                logger.warning(f"⚠️ Transacción reciente ya existe para CP {cp.cp_id}. No se duplicará.")
+                return None  # Retornar None en lugar de simplemente return
+
+            transaction = {
+                'transaction_id': transaction_id,
+                'cp_id': cp.cp_id,
+                'driver_id': cp.driver_id,
+                'energy_consumed': cp.current_consumption,
+                'amount': cp.current_amount,
+                'price_per_kwh': cp.price_per_kwh,
+                'status': status,
+                'start_time': cp.last_heartbeat.isoformat() if cp.last_heartbeat else datetime.now().isoformat(),
+                'end_time': datetime.now().isoformat(),
+                'location': cp.location,
+                'timestamp': datetime.now().isoformat()
+            }
+            
+            # CORRECCIÓN: Usar el método add_transaction que ahora retorna boolean
+            if self.database.add_transaction(transaction):
+                logger.info(f"💰 Transacción registrada: {transaction_id} - CP: {cp.cp_id}, Importe: €{cp.current_amount:.2f}")
+                
+                # Resetear contadores después de registrar transacción
+                cp.current_consumption = 0.0
+                cp.current_amount = 0.0
+                
+                return transaction  # RETORNAR los datos de la transacción
+            else:
+                return None
+                
+        except Exception as e:
+            logger.error(f"❌ Error registrando transacción: {e}", exc_info=True)
+            return None
 
     # ================================================================
     # 🎯 NUEVO: Método para enviar tickets al driver
     # ================================================================
-    def send_ticket_to_driver(self, cp: ChargingPoint, transaction_data: dict):
-        """Envía ticket de transacción al conductor"""
+    def send_ticket_to_driver(self, transaction_data: dict):
+        """Envía ticket al conductor - SOLO si hay conductor real"""
         try:
-            if not cp.driver_id:
-                logger.warning(f"⚠️ No hay driver_id para enviar ticket del CP {cp.cp_id}")
+            # CORRECCIÓN: Verificar que transaction_data no sea None y tenga driver_id válido
+            if not transaction_data:
+                logger.warning("⚠️ No se puede enviar ticket: datos de transacción vacíos")
+                return
+                
+            driver_id = transaction_data.get('driver_id')
+            
+            # CORRECCIÓN: No enviar ticket si es MANUAL o no hay conductor
+            if not driver_id or driver_id == "MANUAL":
+                logger.info(f"ℹ️ No se envía ticket - Conductor manual o no especificado: {driver_id}")
                 return
                 
             ticket_message = {
-                'type': 'TRANSACTION_TICKET',
+                'driver_id': driver_id,
+                'type': 'CHARGING_TICKET',
                 'ticket_id': transaction_data['transaction_id'],
-                'driver_id': cp.driver_id,
-                'cp_id': cp.cp_id,
-                'location': cp.location,
-                'energy_consumed_kwh': round(transaction_data['energy_consumed'], 2),
-                'total_amount_eur': round(transaction_data['amount'], 2),
-                'price_per_kwh': cp.price_per_kwh,
+                'cp_id': transaction_data['cp_id'],
+                'location': transaction_data.get('location', 'Desconocida'),
+                'energy_consumed': transaction_data['energy_consumed'],
+                'amount': transaction_data['amount'],
+                'price_per_kwh': transaction_data['price_per_kwh'],
                 'start_time': transaction_data['start_time'],
                 'end_time': transaction_data['end_time'],
-                'duration_minutes': self.calculate_duration_minutes(
-                    transaction_data['start_time'], 
-                    transaction_data['end_time']
-                ),
-                'status': 'COMPLETED',
                 'timestamp': datetime.now().isoformat()
             }
             
-            self.kafka_manager.send_message('driver_tickets', ticket_message)
-            logger.info(f"🎫 Ticket enviado a driver {cp.driver_id} - Transacción: {transaction_data['transaction_id']}")
+            self.kafka_manager.send_message('driver_responses', ticket_message)
+            logger.info(f"🎫 Ticket enviado a conductor {driver_id} - Transacción: {transaction_data['transaction_id']}")
             
         except Exception as e:
-            logger.error(f"❌ Error enviando ticket a driver {cp.driver_id}: {e}", exc_info=True)
+            logger.error(f"❌ Error enviando ticket a driver {transaction_data.get('driver_id', 'desconocido')}: {e}")
 
     # ================================================================
     # 🎯 NUEVO: Método para enviar tickets al engine
     # ================================================================
-    def send_ticket_to_engine(self, cp: ChargingPoint, transaction_data: dict):
-        """Envía ticket de transacción al engine"""
+    def send_ticket_to_engine(self, cp_id: str, transaction_data: dict):
+        """Envía ticket al Engine - CON VERIFICACIONES"""
         try:
+            # CORRECCIÓN: Verificar que transaction_data no sea None
+            if not transaction_data:
+                logger.warning(f"⚠️ No se puede enviar ticket a Engine {cp_id}: datos de transacción vacíos")
+                return
+                
             ticket_message = {
-                'type': 'TRANSACTION_TICKET',
+                'cp_id': cp_id,
+                'type': 'CHARGING_TICKET',
                 'ticket_id': transaction_data['transaction_id'],
-                'cp_id': cp.cp_id,
-                'energy_consumed_kwh': round(transaction_data['energy_consumed'], 2),
-                'total_amount_eur': round(transaction_data['amount'], 2),
-                'price_per_kwh': cp.price_per_kwh,
+                'energy_consumed': transaction_data['energy_consumed'],
+                'amount': transaction_data['amount'],
+                'price_per_kwh': transaction_data['price_per_kwh'],
                 'start_time': transaction_data['start_time'],
                 'end_time': transaction_data['end_time'],
-                'duration_minutes': self.calculate_duration_minutes(
-                    transaction_data['start_time'], 
-                    transaction_data['end_time']
-                ),
-                'status': 'COMPLETED',
                 'timestamp': datetime.now().isoformat()
             }
             
-            self.kafka_manager.send_message('engine_tickets', ticket_message)
-            logger.info(f"🎫 Ticket enviado a engine {cp.cp_id} - Transacción: {transaction_data['transaction_id']}")
+            self.kafka_manager.send_message('supply_response', ticket_message)
+            logger.info(f"🎫 Ticket enviado a Engine {cp_id} - Transacción: {transaction_data['transaction_id']}")
             
         except Exception as e:
-            logger.error(f"❌ Error enviando ticket a engine {cp.cp_id}: {e}", exc_info=True)
-
+            logger.error(f"❌ Error enviando ticket a engine {cp_id}: {e}")
     # ================================================================
     # 🎯 NUEVO: Método auxiliar para calcular duración
     # ================================================================
@@ -1056,42 +1185,92 @@ class EVCentral:
     # 🎯 MODIFICADO: Método mejorado para transacciones fallidas con tickets
     # ================================================================
     def record_failed_transaction(self, cp: ChargingPoint, failure_reason: str, driver_id: str):
-        """Registra una transacción fallida por avería y envía tickets"""
-        transaction_id = f"TXN_FAIL_{int(time.time())}"
-        transaction = {
-            'transaction_id': transaction_id,
-            'cp_id': cp.cp_id,
-            'driver_id': driver_id,
-            'energy_consumed': cp.current_consumption,
-            'amount': cp.current_amount,
-            'price_per_kwh': cp.price_per_kwh,
-            'status': 'FAILED',
-            'failure_reason': failure_reason,
-            'start_time': cp.last_heartbeat.isoformat() if cp.last_heartbeat else datetime.now().isoformat(),
-            'end_time': datetime.now().isoformat(),
-            'location': cp.location
-        }
-        
-        self.database.add_transaction(transaction)
-        logger.info(f"❌ Transacción fallida registrada: {transaction_id} - Razón: {failure_reason}")
-        
-        # Enviar tickets de transacción fallida
-        if driver_id:
-            self.send_failed_ticket_to_driver(cp, transaction, failure_reason)
-        self.send_failed_ticket_to_engine(cp, transaction, failure_reason)
-        
-        self.update_cp_status(
-            cp_id=cp.cp_id,
-            status="AVERIADO",
-            consumption=0.0,
-            amount=0.0,
-            driver_id=None
-        )
+        """Registra una transacción fallida por avería - MEJORADO"""
+        try:
+            transaction_id = f"TXN_FAIL_{int(time.time())}_{cp.cp_id}"
+            
+            transaction = {
+                'transaction_id': transaction_id,
+                'cp_id': cp.cp_id,
+                'driver_id': driver_id,
+                'energy_consumed': cp.current_consumption,
+                'amount': cp.current_amount,
+                'price_per_kwh': cp.price_per_kwh,
+                'status': 'FAILED',
+                'failure_reason': failure_reason,
+                'start_time': cp.last_heartbeat.isoformat() if cp.last_heartbeat else datetime.now().isoformat(),
+                'end_time': datetime.now().isoformat(),
+                'location': cp.location,
+                'timestamp': datetime.now().isoformat()
+            }
+            
+            if self.database.add_transaction(transaction):
+                logger.info(f"❌ Transacción fallida registrada: {transaction_id} - Razón: {failure_reason}")
+                
+                # CORRECCIÓN: Notificar al conductor si es un conductor real
+                if driver_id and driver_id != "MANUAL":
+                    self.send_failure_notification_to_driver(driver_id, cp.cp_id, failure_reason, transaction)
+                else:
+                    # Notificar solo al Engine si es suministro manual
+                    self.send_failure_notification_to_engine(cp.cp_id, failure_reason, transaction)
+                
+                # Resetear contadores del CP
+                cp.current_consumption = 0.0
+                cp.current_amount = 0.0
+                cp.driver_id = None
+                
+                return transaction
+            else:
+                return None
+                
+        except Exception as e:
+            logger.error(f"❌ Error registrando transacción fallida: {e}", exc_info=True)
+            return None
+
+    def send_failure_notification_to_driver(self, driver_id: str, cp_id: str, failure_reason: str, transaction_data: dict):
+        """Notifica al conductor sobre una avería durante el suministro"""
+        try:
+            failure_message = {
+                'driver_id': driver_id,
+                'type': 'CHARGING_FAILED',
+                'cp_id': cp_id,
+                'failure_reason': failure_reason,
+                'energy_consumed': transaction_data.get('energy_consumed', 0),
+                'amount_charged': transaction_data.get('amount', 0),
+                'transaction_id': transaction_data.get('transaction_id'),
+                'timestamp': datetime.now().isoformat()
+            }
+            
+            self.kafka_manager.send_message('driver_responses', failure_message)
+            logger.info(f"🚨 Notificación de avería enviada a conductor {driver_id}")
+            
+        except Exception as e:
+            logger.error(f"❌ Error enviando notificación de fallo a conductor {driver_id}: {e}")
+
+    def send_failure_notification_to_engine(self, cp_id: str, failure_reason: str, transaction_data: dict):
+        """Notifica al Engine sobre una avería durante el suministro"""
+        try:
+            failure_message = {
+                'cp_id': cp_id,
+                'type': 'CHARGING_FAILED',
+                'failure_reason': failure_reason,
+                'energy_consumed': transaction_data.get('energy_consumed', 0),
+                'amount_charged': transaction_data.get('amount', 0),
+                'transaction_id': transaction_data.get('transaction_id'),
+                'timestamp': datetime.now().isoformat()
+            }
+            
+            self.kafka_manager.send_message('supply_response', failure_message)
+            logger.info(f"🚨 Notificación de avería enviada a Engine {cp_id}")
+            
+        except Exception as e:
+            logger.error(f"❌ Error enviando notificación de fallo a Engine {cp_id}: {e}")
+
 
     # ================================================================
     # 🎯 NUEVO: Método para tickets fallidos al driver
     # ================================================================
-    def send_failed_ticket_to_driver(self, cp: ChargingPoint, transaction_data: dict, failure_reason: str):
+    def send_failed_ticket(self, cp: ChargingPoint, transaction_data: dict, failure_reason: str):
         """Envía ticket de transacción fallida al conductor"""
         try:
             ticket_message = {
@@ -1114,14 +1293,18 @@ class EVCentral:
                 'timestamp': datetime.now().isoformat()
             }
             
-            self.kafka_manager.send_message('driver_tickets', ticket_message)
+            
+            #self.kafka_manager.send_message('driver_tickets', ticket_message)
+            #logger.info(f"🎫 Ticket FALLIDO enviado a driver {cp.driver_id}")
+
+            self.kafka_manager.send_message('supply_response', ticket_message)
             logger.info(f"🎫 Ticket FALLIDO enviado a driver {cp.driver_id}")
             
         except Exception as e:
             logger.error(f"❌ Error enviando ticket fallido a driver: {e}")
     
     def send_control_command(self, cp_id: str, command: str):
-        """Envía comandos de control a CPs via Kafka - MEJORADO"""
+        """Envía comandos de control a CPs via Kafka - VERSIÓN SIMPLE"""
         cp = self.database.get_charging_point(cp_id)
         if cp:
             logger.info(f"🔄 Enviando comando {command} a CP {cp_id} via Kafka")
@@ -1133,11 +1316,13 @@ class EVCentral:
                 'source': 'central'
             }
             
+            # ENVÍO SIMPLE - sin keys
             self.kafka_manager.send_message('control_commands', control_message)
             logger.debug(f"📤 Mensaje Kafka enviado a control_commands: {control_message}")
             
-            # CORRECCIÓN: Solo actualizar estado local para comandos manuales
-            # Los comandos automáticos desde el Engine ya manejan su estado
+            # Solo logs, no actualizar estado aquí
+            print(f"✅ Comando {command} enviado a punto de carga {cp_id}")
+            # Mantener lógica de actualización de estado
             if command == "STOP":
                 if cp.status == "SUMINISTRANDO":
                     self.update_cp_status(cp_id, "PARADO")
@@ -1152,11 +1337,11 @@ class EVCentral:
                 self.update_cp_status(cp_id, "ACTIVADO") 
                 logger.info(f"▶️ CP {cp_id} puesto en estado ACTIVADO")
                 print(f"✅ Punto de carga {cp_id} reanudado")
-                
+                    
         else:
             logger.error(f"❌ CP {cp_id} no encontrado para enviar comando")
             print(f"❌ Punto de carga {cp_id} no encontrado")
-            
+
     def start_kafka_consumer(self):
         """Inicia el consumidor de Kafka en un hilo separado"""
         try:
@@ -1231,7 +1416,7 @@ class EVCentral:
     # 🎯 MODIFICADO: Procesar supply_response con manejo de STOP_SUPPLY y tickets
     # ================================================================
     def process_supply_response(self, message):
-        """Procesa respuestas de suministro desde el Engine - CON TICKETS"""
+        """Procesa respuestas de suministro desde el Engine - MANEJAR TICKETS"""
         logger.info(f"🎯 process_supply_response llamado con: {message} (TIPO: {type(message)})")
         try:
             # Manejar tanto diccionarios como strings
@@ -1246,7 +1431,13 @@ class EVCentral:
                 logger.error(f"❌ Mensaje no es ni string ni diccionario: {type(message)} - {message}")
                 return
 
-            # Ahora message debería ser un diccionario
+            # CORRECCIÓN: Manejar también mensajes de ticket
+            if message.get('type') == 'CHARGING_TICKET':
+                logger.info(f"🎫 Ticket recibido del Engine - CP: {message.get('cp_id')}")
+                # Aquí podrías procesar acuses de recibo de tickets si es necesario
+                return
+
+            # Resto del código para procesar solicitudes de suministro...
             cp_id = message.get('cp_id')
             message_type = message.get('type')
             reason = message.get('reason', 'No especificado')
@@ -1319,19 +1510,17 @@ class EVCentral:
                     
             else:
                 logger.warning(f"⚠️ Tipo de mensaje no reconocido: {message_type}")
-                
+
         except Exception as e:
             logger.error(f"❌ Error procesando respuesta de suministro: {e}", exc_info=True)
-        
+    
     def process_supply_flow(self, message):
-        """Procesa mensajes de caudal de suministro desde el Engine - CORREGIDO"""
+        """Procesa mensajes de caudal de suministro desde el Engine - SIN DUPLICADOS"""
         logger.info(f"🎯 process_supply_flow llamado con: {message} (TIPO: {type(message)})")
         try:
-            # Manejar tanto diccionarios como strings
             if isinstance(message, str):
                 try:
                     message = json.loads(message)
-                    logger.info(f"🔄 Mensaje parseado de string a dict: {message}")
                 except json.JSONDecodeError as e:
                     logger.error(f"❌ Error parseando mensaje string a JSON: {e}")
                     return
@@ -1353,24 +1542,19 @@ class EVCentral:
                 logger.error(f"❌ CP {cp_id} no encontrado")
                 return
 
-            # CORRECCIÓN: Manejar diferentes razones del mensaje
+            # CORRECCIÓN: Manejar finalización de suministro SIN duplicar transacciones
             if reason == 'SUPPLY_ENDED':
-                # Suministro finalizado
+                # Solo actualizar estado, NO registrar transacción aquí
+                # La transacción se registrará en update_cp_status cuando cambie el estado
                 if cp.status == "SUMINISTRANDO":
-                    # Registrar transacción completada
-                    if cp.current_amount > 0:
-                        self.record_transaction(cp, "COMPLETED")
-                    
                     self.update_cp_status(cp_id, "ACTIVADO")
                     logger.info(f"✅ Suministro FINALIZADO - CP: {cp_id}, Energía total: {kwh:.2f}kWh")
+                else:
+                    logger.info(f"ℹ️ CP {cp_id} ya no estaba suministrando")
                 return
 
-            # Suministro en progreso
-            # Calcular importe actual basado en el precio del CP
+            # Suministro en progreso - actualizar datos
             current_amount = kwh * cp.price_per_kwh
-            
-            # Calcular caudal (kW) basado en incremento de energía
-            # Asumimos 1 kWh por segundo para simplificar (en realidad sería menos)
             current_flow_rate = 1.0  # kW
 
             # Actualizar el estado del CP
