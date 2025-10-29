@@ -368,7 +368,6 @@ class RealKafkaManager:
         self.consumers = {}
         
         try:
-            # VOLVER a la configuración ORIGINAL sin keys
             self.producer = KafkaProducer(
                 bootstrap_servers=[self.bootstrap_servers],
                 value_serializer=lambda v: json.dumps(v).encode('utf-8'),
@@ -1027,11 +1026,7 @@ class EVCentral:
                 transaction_data = self.record_transaction(cp, "COMPLETED")
                 if transaction_data:
                     logger.info(f"💰 Transacción registrada para CP {cp_id}")
-                    
-                    if cp.driver_id and cp.driver_id != "MANUAL":
-                        self.send_ticket_to_driver(transaction_data)
-                    else:
-                        self.send_ticket_to_engine(cp_id, transaction_data)
+                    self.send_ticket(cp_id, transaction_data)
             else:
                 logger.info(f"🔍 Sin importe significativo, no se registra transacción")
         
@@ -1125,54 +1120,15 @@ class EVCentral:
     # ================================================================
     # 🎯 NUEVO: Método para enviar tickets al driver
     # ================================================================
-    def send_ticket_to_driver(self, transaction_data: dict):
-        """Envía ticket al conductor - SOLO si hay conductor real"""
+    def send_ticket(self, cp_id: str, transaction_data: dict):
+        """Envía ticket al Engine - VERSIÓN CORREGIDA"""
         try:
-            # CORRECCIÓN: Verificar que transaction_data no sea None y tenga driver_id válido
             if not transaction_data:
-                logger.warning("⚠️ No se puede enviar ticket: datos de transacción vacíos")
-                return
-                
-            driver_id = transaction_data.get('driver_id')
-            
-            # CORRECCIÓN: No enviar ticket si es MANUAL o no hay conductor
-            if not driver_id or driver_id == "MANUAL":
-                logger.info(f"ℹ️ No se envía ticket - Conductor manual o no especificado: {driver_id}")
+                logger.warning(f"⚠️ No se puede enviar ticket a Engine {cp_id}: datos vacíos")
                 return
                 
             ticket_message = {
-                'driver_id': driver_id,
-                'type': 'CHARGING_TICKET',
-                'ticket_id': transaction_data['transaction_id'],
-                'cp_id': transaction_data['cp_id'],
-                'location': transaction_data.get('location', 'Desconocida'),
-                'energy_consumed': transaction_data['energy_consumed'],
-                'amount': transaction_data['amount'],
-                'price_per_kwh': transaction_data['price_per_kwh'],
-                'start_time': transaction_data['start_time'],
-                'end_time': transaction_data['end_time'],
-                'timestamp': datetime.now().isoformat()
-            }
-            
-            self.kafka_manager.send_message('driver_responses', ticket_message)
-            logger.info(f"🎫 Ticket enviado a conductor {driver_id} - Transacción: {transaction_data['transaction_id']}")
-            
-        except Exception as e:
-            logger.error(f"❌ Error enviando ticket a driver {transaction_data.get('driver_id', 'desconocido')}: {e}")
-
-    # ================================================================
-    # 🎯 NUEVO: Método para enviar tickets al engine
-    # ================================================================
-    def send_ticket_to_engine(self, cp_id: str, transaction_data: dict):
-        """Envía ticket al Engine - CON VERIFICACIONES"""
-        try:
-            # CORRECCIÓN: Verificar que transaction_data no sea None
-            if not transaction_data:
-                logger.warning(f"⚠️ No se puede enviar ticket a Engine {cp_id}: datos de transacción vacíos")
-                return
-                
-            ticket_message = {
-                'cp_id': cp_id,
+                'cp_id': cp_id,  # ⭐ INCLUIR cp_id explícitamente
                 'type': 'CHARGING_TICKET',
                 'ticket_id': transaction_data['transaction_id'],
                 'energy_consumed': transaction_data['energy_consumed'],
@@ -1183,11 +1139,13 @@ class EVCentral:
                 'timestamp': datetime.now().isoformat()
             }
             
-            self.kafka_manager.send_message('supply_response', ticket_message)
+            # Enviar a topic específico para tickets del Engine
+            self.kafka_manager.send_message('engine_tickets', ticket_message)
             logger.info(f"🎫 Ticket enviado a Engine {cp_id} - Transacción: {transaction_data['transaction_id']}")
             
         except Exception as e:
             logger.error(f"❌ Error enviando ticket a engine {cp_id}: {e}")
+
     # ================================================================
     # 🎯 NUEVO: Método auxiliar para calcular duración
     # ================================================================
@@ -1505,11 +1463,8 @@ class EVCentral:
                     # 1. Registrar transacción completada
                     transaction_data = self.record_transaction(cp, "COMPLETED")
                     
-                    # 2. Enviar ticket al Driver
-                    self.send_ticket_to_driver(cp, transaction_data)
-                    
                     # 3. Enviar ticket al Engine
-                    self.send_ticket_to_engine(cp, transaction_data)
+                    self.send_ticket(cp, transaction_data)
                     
                     # 4. Enviar comando STOP al Engine (confirmación)
                     control_message = {
@@ -1570,11 +1525,9 @@ class EVCentral:
                     
                     # Registrar transacción inmediatamente
                     transaction_data = self.record_transaction(cp, "COMPLETED")
+                    
                     if transaction_data:
-                        if cp.driver_id and cp.driver_id != "MANUAL":
-                            self.send_ticket_to_driver(transaction_data)
-                        else:
-                            self.send_ticket_to_engine(cp.cp_id, transaction_data)
+                        self.send_ticket(cp_id, transaction_data)
                     
                     # 🎯 CAMBIO INMEDIATO: Cambiar a ACTIVADO después de procesar todo
                     self.update_cp_status(cp_id, "ACTIVADO")
