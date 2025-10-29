@@ -50,9 +50,10 @@ services:
         kafka-topics --create --topic engine_status --partitions 3 --replication-factor 1 --bootstrap-server kafka:9092 || true &&
         kafka-topics --create --topic engine_suministro --partitions 3 --replication-factor 1 --bootstrap-server kafka:9092 || true &&
         kafka-topics --create --topic supply_flow --partitions 3 --replication-factor 1 --bootstrap-server kafka:9092 || true &&
-        kafka-topics --create --topic supply_response --partitions 3 --replication-factor 1 --bootstrap-server kafka:9092 || true &&
         kafka-topics --create --topic driver_responses --partitions 3 --replication-factor 1 --bootstrap-server kafka:9092 || true &&
         kafka-topics --create --topic driver_requests --partitions 3 --replication-factor 1 --bootstrap-server kafka:9092 || true &&
+        kafka-topics --create --topic supply_response --partitions 3 --replication-factor 1 --bootstrap-server kafka:9092 || true &&
+        kafka-topics --create --topic engine_tickets --partitions 3 --replication-factor 1 --bootstrap-server kafka:9092 || true &&
         echo 'Tópicos creados:' &&
         kafka-topics --list --bootstrap-server kafka:9092
       "
@@ -118,5 +119,3 @@ services:
 networks:
   kafka-network:
     driver: bridge
-
-
