@@ -1121,14 +1121,14 @@ class EVCentral:
     # 🎯 NUEVO: Método para enviar tickets al driver
     # ================================================================
     def send_ticket(self, cp_id: str, transaction_data: dict):
-        """Envía ticket al Engine - VERSIÓN CORREGIDA"""
+        """Envía ticket al Engine Y al Driver - VERSIÓN CORREGIDA"""
         try:
             if not transaction_data:
-                logger.warning(f"⚠️ No se puede enviar ticket a Engine {cp_id}: datos vacíos")
+                logger.warning(f"⚠️ No se puede enviar ticket: datos de transacción vacíos")
                 return
-                
-            ticket_message = {
-                'cp_id': cp_id,  # ⭐ INCLUIR cp_id explícitamente
+            
+            base_ticket = {
+                'cp_id': cp_id,
                 'type': 'CHARGING_TICKET',
                 'ticket_id': transaction_data['transaction_id'],
                 'energy_consumed': transaction_data['energy_consumed'],
@@ -1139,12 +1139,21 @@ class EVCentral:
                 'timestamp': datetime.now().isoformat()
             }
             
-            # Enviar a topic específico para tickets del Engine
-            self.kafka_manager.send_message('engine_tickets', ticket_message)
-            logger.info(f"🎫 Ticket enviado a Engine {cp_id} - Transacción: {transaction_data['transaction_id']}")
+            engine_ticket = base_ticket.copy()
+            engine_ticket['driver_id'] = "MANUAL"  # ⭐ Agregar driver_id para Engine
+            self.kafka_manager.send_message('engine_tickets', engine_ticket)
+            logger.info(f"🎫 Ticket enviado a Engine {cp_id}")
             
+            driver_id = transaction_data.get('driver_id')
+            if driver_id and driver_id != "MANUAL":
+                driver_ticket = base_ticket.copy()
+                driver_ticket['driver_id'] = driver_id  # ⭐ Agregar driver_id real
+                driver_ticket['location'] = transaction_data.get('location', 'Desconocida')
+                self.kafka_manager.send_message('driver_tickets', driver_ticket)
+                logger.info(f"🎫 Ticket enviado a Driver {driver_id}")
+                
         except Exception as e:
-            logger.error(f"❌ Error enviando ticket a engine {cp_id}: {e}")
+            logger.error(f"❌ Error enviando ticket: {e}")
 
     # ================================================================
     # 🎯 NUEVO: Método auxiliar para calcular duración
@@ -1244,43 +1253,6 @@ class EVCentral:
             
         except Exception as e:
             logger.error(f"❌ Error enviando notificación de fallo a Engine {cp_id}: {e}")
-
-
-    # ================================================================
-    # 🎯 NUEVO: Método para tickets fallidos al driver
-    # ================================================================
-    def send_failed_ticket(self, cp: ChargingPoint, transaction_data: dict, failure_reason: str):
-        """Envía ticket de transacción fallida al conductor"""
-        try:
-            ticket_message = {
-                'type': 'TRANSACTION_TICKET',
-                'ticket_id': transaction_data['transaction_id'],
-                'driver_id': cp.driver_id,
-                'cp_id': cp.cp_id,
-                'location': cp.location,
-                'energy_consumed_kwh': round(transaction_data['energy_consumed'], 2),
-                'total_amount_eur': round(transaction_data['amount'], 2),
-                'price_per_kwh': cp.price_per_kwh,
-                'start_time': transaction_data['start_time'],
-                'end_time': transaction_data['end_time'],
-                'duration_minutes': self.calculate_duration_minutes(
-                    transaction_data['start_time'], 
-                    transaction_data['end_time']
-                ),
-                'status': 'FAILED',
-                'failure_reason': failure_reason,
-                'timestamp': datetime.now().isoformat()
-            }
-            
-            
-            #self.kafka_manager.send_message('driver_tickets', ticket_message)
-            #logger.info(f"🎫 Ticket FALLIDO enviado a driver {cp.driver_id}")
-
-            self.kafka_manager.send_message('supply_response', ticket_message)
-            logger.info(f"🎫 Ticket FALLIDO enviado a driver {cp.driver_id}")
-            
-        except Exception as e:
-            logger.error(f"❌ Error enviando ticket fallido a driver: {e}")
     
     def send_control_command(self, cp_id: str, command: str):
         """Envía comandos de control a CPs via Kafka - VERSIÓN SIMPLE"""
