@@ -56,8 +56,6 @@ def setup_logging():
 logger = setup_logging()
 
 class ChargingPoint:
-    """Clase que representa un punto de carga"""
-    
     def __init__(self, cp_id: str, location: str, price_per_kwh: float):
         self.cp_id = cp_id
         self.location = location
@@ -71,6 +69,11 @@ class ChargingPoint:
         self.total_energy_supplied = 0.0
         self.total_revenue = 0.0
         self.registration_date = datetime.now().isoformat()
+        
+        # 🎯 NUEVA ESTRATEGIA: Separar estado de finalización
+        self.last_supply_message = None
+        self.supply_ending = False  # ⭐ NUEVO: Indica que estamos en proceso de finalización
+        self.supply_ended_time = None  # ⭐ NUEVO: Timestamp de cuando realmente terminó
     
     def parse(self):
         """Convierte el CP a diccionario para serialización"""
@@ -85,7 +88,11 @@ class ChargingPoint:
             'last_heartbeat': self.last_heartbeat.isoformat() if self.last_heartbeat else None,
             'total_energy_supplied': self.total_energy_supplied,
             'total_revenue': self.total_revenue,
-            'registration_date': self.registration_date
+            'registration_date': self.registration_date,
+            # 🎯 NUEVO: Campos de control de suministro
+            'last_supply_message': self.last_supply_message.isoformat() if self.last_supply_message else None,
+            'supply_ending': self.supply_ending,  # ⭐ NUEVO
+            'supply_ended_time': self.supply_ended_time.isoformat() if self.supply_ended_time else None
         }
     
     @classmethod
@@ -102,6 +109,13 @@ class ChargingPoint:
         
         if data['last_heartbeat']:
             cp.last_heartbeat = datetime.fromisoformat(data['last_heartbeat'])
+        
+        # 🎯 NUEVO: Campos de control de suministro
+        if data.get('last_supply_message'):
+            cp.last_supply_message = datetime.fromisoformat(data['last_supply_message'])
+        cp.supply_ending = data.get('supply_ending', False)
+        if data.get('supply_ended_time'):
+            cp.supply_ended_time = datetime.fromisoformat(data['supply_ended_time'])
         
         return cp
 
@@ -988,6 +1002,13 @@ class EVCentral:
             return
             
         previous_status = cp.status
+
+        if status == "SUMINISTRANDO" and previous_status != "SUMINISTRANDO":
+            logger.info(f"🔄 Iniciando nuevo suministro - Reseteando contadores para CP {cp_id}")
+            cp.supply_ended_time = None  # ⭐ RESET CRÍTICO
+            cp.supply_ending = False
+            cp.last_supply_message = None
+
         logger.info(f"🔍 DEBUG update_cp_status INICIO")
         logger.info(f"🔍 CP: {cp_id}, Estado anterior: '{previous_status}', Nuevo estado: '{status}'")
         logger.info(f"🔍 Consumo: {consumption}, Importe: {amount}, Driver: {driver_id}")
@@ -1316,15 +1337,13 @@ class EVCentral:
                 'source': 'central'
             }
             
-            # ENVÍO SIMPLE - sin keys
             self.kafka_manager.send_message('control_commands', control_message)
             logger.debug(f"📤 Mensaje Kafka enviado a control_commands: {control_message}")
             
-            # Solo logs, no actualizar estado aquí
             print(f"✅ Comando {command} enviado a punto de carga {cp_id}")
             # Mantener lógica de actualización de estado
             if command == "STOP":
-                if cp.status == "SUMINISTRANDO":
+                if cp.status == "SUMINISTRANDO" or cp.status == "ACTIVADO":
                     self.update_cp_status(cp_id, "PARADO")
                     logger.info(f"⏹️ CP {cp_id} puesto en estado PARADO")
                 print(f"✅ Comando STOP enviado a punto de carga {cp_id}")
@@ -1515,17 +1534,12 @@ class EVCentral:
             logger.error(f"❌ Error procesando respuesta de suministro: {e}", exc_info=True)
     
     def process_supply_flow(self, message):
-        """Procesa mensajes de caudal de suministro desde el Engine - SIN DUPLICADOS"""
-        logger.info(f"🎯 process_supply_flow llamado con: {message} (TIPO: {type(message)})")
+        """Procesa mensajes de caudal de suministro - VERSIÓN CORREGIDA"""
+        logger.info(f"🎯 process_supply_flow llamado con: {message}")
         try:
             if isinstance(message, str):
-                try:
-                    message = json.loads(message)
-                except json.JSONDecodeError as e:
-                    logger.error(f"❌ Error parseando mensaje string a JSON: {e}")
-                    return
+                message = json.loads(message)
             elif not isinstance(message, dict):
-                logger.error(f"❌ Mensaje no es ni string ni diccionario: {type(message)} - {message}")
                 return
 
             cp_id = message.get('cp_id')
@@ -1534,30 +1548,51 @@ class EVCentral:
             reason = message.get('reason', '')
             
             if not cp_id:
-                logger.error("❌ Parámetros insuficientes en mensaje de suministro")
                 return
             
             cp = self.database.get_charging_point(cp_id)
             if not cp:
-                logger.error(f"❌ CP {cp_id} no encontrado")
                 return
 
-            # CORRECCIÓN: Manejar finalización de suministro SIN duplicar transacciones
+            # 🎯 VALIDACIÓN MEJORADA: Solo rechazar si estamos en proceso de finalización
+            if cp.supply_ending:
+                logger.warning(f"🚫 IGNORANDO mensaje para CP {cp_id} - En proceso de finalización")
+                return
+
+            # Manejar finalización de suministro
             if reason == 'SUPPLY_ENDED':
-                # Solo actualizar estado, NO registrar transacción aquí
-                # La transacción se registrará en update_cp_status cuando cambie el estado
                 if cp.status == "SUMINISTRANDO":
+                    logger.info(f"🛑 SUPPLY_ENDED recibido para CP {cp_id} - Iniciando finalización")
+                    
+                    # 🎯 MARCAR como en proceso de finalización (NO cambiar estado todavía)
+                    cp.supply_ending = True
+                    cp.last_supply_message = datetime.now()
+                    
+                    # Registrar transacción inmediatamente
+                    transaction_data = self.record_transaction(cp, "COMPLETED")
+                    if transaction_data:
+                        if cp.driver_id and cp.driver_id != "MANUAL":
+                            self.send_ticket_to_driver(transaction_data)
+                        else:
+                            self.send_ticket_to_engine(cp.cp_id, transaction_data)
+                    
+                    # 🎯 CAMBIO INMEDIATO: Cambiar a ACTIVADO después de procesar todo
                     self.update_cp_status(cp_id, "ACTIVADO")
-                    logger.info(f"✅ Suministro FINALIZADO - CP: {cp_id}, Energía total: {kwh:.2f}kWh")
+                    
+                    # 🎯 MARCAR finalización completada
+                    cp.supply_ended_time = datetime.now()
+                    logger.info(f"✅ Suministro COMPLETADO para CP {cp_id}")
+                    
                 else:
-                    logger.info(f"ℹ️ CP {cp_id} ya no estaba suministrando")
+                    logger.warning(f"⚠️ SUPPLY_ENDED recibido para CP {cp_id} pero no estaba SUMINISTRANDO")
                 return
 
-            # Suministro en progreso - actualizar datos
+            # Suministro normal en progreso
+            cp.last_supply_message = datetime.now()
+            
             current_amount = kwh * cp.price_per_kwh
-            current_flow_rate = 1.0  # kW
+            current_flow_rate = 1.0
 
-            # Actualizar el estado del CP
             self.update_cp_status(
                 cp_id=cp_id,
                 status="SUMINISTRANDO",
@@ -1566,14 +1601,13 @@ class EVCentral:
                 driver_id=driver_id
             )
             
-            # Actualizar estadísticas acumuladas
             cp.total_energy_supplied = kwh
             cp.total_revenue = current_amount
             
-            logger.info(f"⚡ Suministro ACTIVO - CP: {cp_id}, Energía: {kwh:.2f}kWh, Importe: €{current_amount:.2f}")
+            logger.info(f"⚡ Suministro ACTIVO - CP: {cp_id}, Energía: {kwh:.2f}kWh")
             
         except Exception as e:
-            logger.error(f"❌ Error procesando mensaje de suministro: {e}", exc_info=True)
+            logger.error(f"❌ Error procesando mensaje de suministro: {e}")
 
     def send_flow_update_to_driver(self, driver_id: str, cp_id: str, flow_rate: float, 
                                   energy_delivered: float, current_amount: float, timestamp: str = None):
@@ -1714,6 +1748,12 @@ class EVCentral:
     def authorize_cp_supply(self, cp_id: str, driver_id: str) -> bool:
         """Autoriza suministro en el CP via socket Y Kafka"""
         try:
+
+            cp.supply_ended_time = None
+            cp.supply_ending = False
+            cp.last_supply_message = None
+            logger.info(f"🔄 Autorizando suministro - Contadores reseteados para CP {cp_id}")
+
             # Enviar comando START por Kafka
             control_message = {
                 'cp_id': cp_id,
