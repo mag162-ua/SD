@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-
+import signal # ¡Asegúrate de importar 'signal' en la parte superior!
+import atexit
 import time
 import sys
 import socket
@@ -9,6 +10,12 @@ import json
 import os
 from datetime import datetime
 from kafka import KafkaConsumer, KafkaProducer
+if os.name != 'nt':
+    import select
+    import tty
+    import termios
+else:
+    import msvcrt
 
 class MENSAJES_CP_M(enum.Enum):
     STATUS_E = "STATUS_E"
@@ -84,7 +91,7 @@ class EV_CP_E:
                 bootstrap_servers=[f"{self.IP_BROKER}:{self.PUERTO_BROKER}"], 
                 auto_offset_reset='latest', 
                 enable_auto_commit=True, 
-                group_id=f'engine_{self.ID}_group', 
+                #group_id=f'engine_{self.ID}_group', 
                 value_deserializer=lambda x: json.loads(x.decode('utf-8')) if x else None
             )
             print("Conexión Kafka abierta correctamente.")
@@ -175,7 +182,7 @@ class EV_CP_E:
         self.total_kwh_suministrados = 0.0
         ##########################################################NOTIFICAR A LA CENTRAL
         # Iniciar hilo de suministro
-        suministro_thread = threading.Thread(target=self.suministrar_energia, daemon=True)
+        suministro_thread = threading.Thread(target=self.suministrar_energia, daemon=True) ################################################################# DAEMON
         suministro_thread.start()
         print("✅ Hilo de suministro iniciado")
 
@@ -227,7 +234,7 @@ class EV_CP_E:
         self.total_kwh_suministrados = 0.0
 
     def mostrar_menu(self):
-        self.espera_respuesta_menu.set()
+        #self.espera_respuesta_menu.set()
         while True:
 
             os.system('cls' if os.name == 'nt' else 'clear')
@@ -252,15 +259,24 @@ class EV_CP_E:
                     print(f"Total kWh suministrados hasta ahora: {self.total_kwh_suministrados:.2f} kWh")
                     print("-----------------------------------")
                 print("Seleccione una opción: ")
-                response_menu_thread = threading.Thread(target=self.responder_menu, daemon=True)
-                response_menu_thread.start()
+                #response_menu_thread = threading.Thread(target=self.responder_menu, daemon=True)
+                #response_menu_thread.start()
 
+            respuesta = None
+            if os.name == 'nt': # Solo intentar usar msvcrt en Windows
+                if msvcrt.kbhit():
+                    respuesta = msvcrt.getch().decode()
+            else:
+                if select.select([sys.stdin], [], [], 0) == ([sys.stdin], [], []):
+                    # Si hay datos, leemos la línea completa.
+                    respuesta = sys.stdin.readline().strip()
+            self.responder_menu(respuesta)
             time.sleep(1)
 
             
-    def responder_menu(self):
-        self.espera_respuesta_menu.clear()
-        switch = input().strip()
+    def responder_menu(self, switch):
+        #self.espera_respuesta_menu.clear()
+        #switch = input().strip()
 
         if switch == "1":
             estado = ""
@@ -316,20 +332,12 @@ class EV_CP_E:
                 print("IMPOSIBLE_SUMINISTRAR: El punto de carga se encuentra averiado")
 
         elif switch == "4":
-            if self.total_kwh_suministrados != 0.0:
-                self.guardar_estado()
-            if self.producer:
-                self.producer.close()
-            if self.consumer:
-                self.consumer.close()
-            if self.socket_monitor:
-                self.socket_monitor.close()
-            print("CERRADA DE SISTEMA")
-            os._exit(0)
+            self.limpiar_y_salir()
+
         elif switch:
             print("Comando desconocido")
         
-        self.espera_respuesta_menu.set()
+        #self.espera_respuesta_menu.set()
 
     def run(self):
         print("Engine corriendo...")
@@ -342,7 +350,12 @@ class EV_CP_E:
             listener_thread_c = threading.Thread(target=self.escuchar_central, daemon=True)
             listener_thread_c.start()
 
-            self.mostrar_menu()
+            menu_thread = threading.Thread(target=self.mostrar_menu, daemon=True)
+            menu_thread.start()
+
+            #self.mostrar_menu()
+            while True:
+                time.sleep(1)
 
     def guardar_estado(self):
         estado_info = {
@@ -368,6 +381,30 @@ class EV_CP_E:
             except Exception as e:
                 print(f"[ERROR RESILIENCIA] Error al cargar el estado: {e}. Iniciando desde 0.")
                 self.total_kwh_suministrados = 0.0
+
+    def limpiar_y_salir(self):
+        print("\n[Engine Shutdown] Iniciando limpieza de recursos...")
+        if self.ID and self.total_kwh_suministrados != 0.0:
+            self.guardar_estado()
+            time.sleep(1)
+        if self.suministrar_actvio:
+            self.parar_suministro.set() 
+            time.sleep(1.5)
+        try:
+            if hasattr(self, 'producer') and self.producer:
+                self.producer.close()
+            if hasattr(self, 'consumer') and self.consumer:
+                self.consumer.close()
+            # CRUCIAL: Cerrar el socket detiene el bloqueo en .accept() de escuchar_monitor
+            if hasattr(self, 'socket_monitor') and self.socket_monitor:
+                self.socket_monitor.close() 
+        except Exception as e:
+            print(f"[Engine Shutdown] Error al cerrar recursos: {e}")
+
+        print("[Engine Shutdown] Proceso terminado.")
+        time.sleep(2)
+        #os._exit(0)
+        sys.exit(0)
     
 if __name__ == "__main__":
     if len(sys.argv) < 2 or len(sys.argv) > 3:
@@ -376,17 +413,15 @@ if __name__ == "__main__":
     
     puerto_engine = int(sys.argv[2]) if len(sys.argv) == 3 else EV_CP_E.PUERTO_BASE
     engine = EV_CP_E(sys.argv[1], puerto_engine)
-
+    
     try:
         engine.run()
+
     except KeyboardInterrupt:
-        print("Engine detenido. Ctrl+C detectado. Saliendo...")
-        if engine.total_kwh_suministrados != 0.0:
-            engine.guardar_estado()
-        if engine.producer:
-            engine.producer.close()
-        if engine.consumer:
-            engine.consumer.close()
-        if engine.socket_monitor:
-            engine.socket_monitor.close()
+        engine.limpiar_y_salir()
         os._exit(0)
+
+    except Exception as e:
+        # Este bloque sigue siendo crucial para manejar otros errores inesperados.
+        print(f"[ERROR CRÍTICO] Excepción no controlada: {e}")
+        engine.limpiar_y_salir()
