@@ -1000,6 +1000,10 @@ class EVCentral:
             logger.error(f"❌ CP {cp_id} no encontrado en update_cp_status")
             return
             
+        if driver_id:
+            cp.driver_id = driver_id
+            logger.info(f"🔍 Driver ID actualizado: {driver_id} para CP {cp_id}")
+
         previous_status = cp.status
 
         if status == "SUMINISTRANDO" and previous_status != "SUMINISTRANDO":
@@ -1073,24 +1077,12 @@ class EVCentral:
     def record_transaction(self, cp: ChargingPoint, status: str):
         """Registra una transacción completada - RETORNA datos de transacción"""
         try:
-            # Generar ID único basado en timestamp y CP
             transaction_id = f"TXN{int(time.time())}_{cp.cp_id}"
             
-            # Verificar si ya existe una transacción reciente para este CP
-            recent_transactions = [
-                t for t in self.database.transactions 
-                if t.get('cp_id') == cp.cp_id and 
-                (time.time() - datetime.fromisoformat(t.get('timestamp', datetime.now().isoformat())).timestamp()) < 5
-            ]
-            
-            if recent_transactions:
-                logger.warning(f"⚠️ Transacción reciente ya existe para CP {cp.cp_id}. No se duplicará.")
-                return None  # Retornar None en lugar de simplemente return
-
             transaction = {
                 'transaction_id': transaction_id,
                 'cp_id': cp.cp_id,
-                'driver_id': cp.driver_id,
+                'driver_id': cp.driver_id,  # ✅ Asegurar que driver_id se incluya
                 'energy_consumed': cp.current_consumption,
                 'amount': cp.current_amount,
                 'price_per_kwh': cp.price_per_kwh,
@@ -1101,7 +1093,6 @@ class EVCentral:
                 'timestamp': datetime.now().isoformat()
             }
             
-            # CORRECCIÓN: Usar el método add_transaction que ahora retorna boolean
             if self.database.add_transaction(transaction):
                 logger.info(f"💰 Transacción registrada: {transaction_id} - CP: {cp.cp_id}, Importe: €{cp.current_amount:.2f}")
                 
@@ -1109,7 +1100,7 @@ class EVCentral:
                 cp.current_consumption = 0.0
                 cp.current_amount = 0.0
                 
-                return transaction  # RETORNAR los datos de la transacción
+                return transaction
             else:
                 return None
                 
@@ -1139,21 +1130,23 @@ class EVCentral:
                 'timestamp': datetime.now().isoformat()
             }
             
+            # Ticket para Engine
             engine_ticket = base_ticket.copy()
-            engine_ticket['driver_id'] = "MANUAL"  # ⭐ Agregar driver_id para Engine
+            engine_ticket['driver_id'] = transaction_data.get('driver_id', 'MANUAL')
             self.kafka_manager.send_message('engine_tickets', engine_ticket)
-            logger.info(f"🎫 Ticket enviado a Engine {cp_id}")
+            logger.info(f"🎫 Ticket enviado a Engine - CP: {cp_id}, Transacción: {transaction_data['transaction_id']}")
             
+            # Ticket para Driver (solo si es un conductor real)
             driver_id = transaction_data.get('driver_id')
             if driver_id and driver_id != "MANUAL":
                 driver_ticket = base_ticket.copy()
-                driver_ticket['driver_id'] = driver_id  # ⭐ Agregar driver_id real
+                driver_ticket['driver_id'] = driver_id
                 driver_ticket['location'] = transaction_data.get('location', 'Desconocida')
                 self.kafka_manager.send_message('driver_tickets', driver_ticket)
-                logger.info(f"🎫 Ticket enviado a Driver {driver_id}")
+                logger.info(f"🎫 Ticket enviado a Driver {driver_id} - CP: {cp_id}")
                 
         except Exception as e:
-            logger.error(f"❌ Error enviando ticket: {e}")
+            logger.error(f"❌ Error enviando ticket: {e}", exc_info=True)
 
     # ================================================================
     # 🎯 NUEVO: Método auxiliar para calcular duración
@@ -1436,7 +1429,7 @@ class EVCentral:
                     transaction_data = self.record_transaction(cp, "COMPLETED")
                     
                     # 3. Enviar ticket al Engine
-                    self.send_ticket(cp, transaction_data)
+                    self.send_ticket(cp_id, transaction_data)
                     
                     # 4. Enviar comando STOP al Engine (confirmación)
                     control_message = {
@@ -1461,7 +1454,7 @@ class EVCentral:
             logger.error(f"❌ Error procesando respuesta de suministro: {e}", exc_info=True)
     
     def process_supply_flow(self, message):
-        """Procesa mensajes de caudal de suministro - VERSIÓN CORREGIDA"""
+        """Procesa mensajes de caudal de suministro - CON ACTUALIZACIONES AL DRIVER"""
         logger.info(f"🎯 process_supply_flow llamado con: {message}")
         try:
             if isinstance(message, str):
@@ -1481,17 +1474,11 @@ class EVCentral:
             if not cp:
                 return
 
-            # 🎯 VALIDACIÓN MEJORADA: Solo rechazar si estamos en proceso de finalización
-            if cp.supply_ending:
-                logger.warning(f"🚫 IGNORANDO mensaje para CP {cp_id} - En proceso de finalización")
-                return
-
             # Manejar finalización de suministro
             if reason == 'SUPPLY_ENDED':
                 if cp.status == "SUMINISTRANDO":
                     logger.info(f"🛑 SUPPLY_ENDED recibido para CP {cp_id} - Iniciando finalización")
                     
-                    # 🎯 MARCAR como en proceso de finalización (NO cambiar estado todavía)
                     cp.supply_ending = True
                     cp.last_supply_message = datetime.now()
                     
@@ -1501,16 +1488,33 @@ class EVCentral:
                     if transaction_data:
                         self.send_ticket(cp_id, transaction_data)
                     
-                    # 🎯 CAMBIO INMEDIATO: Cambiar a ACTIVADO después de procesar todo
                     self.update_cp_status(cp_id, "ACTIVADO")
                     
-                    # 🎯 MARCAR finalización completada
                     cp.supply_ended_time = datetime.now()
                     logger.info(f"✅ Suministro COMPLETADO para CP {cp_id}")
                     
                 else:
                     logger.warning(f"⚠️ SUPPLY_ENDED recibido para CP {cp_id} pero no estaba SUMINISTRANDO")
                 return
+
+            # 🎯 CORRECCIÓN: Obtener el driver_id REAL del punto de carga
+            real_driver_id = cp.driver_id if cp.driver_id else driver_id
+            
+            # 🎯 CORRECCIÓN: Solo enviar actualizaciones si es un conductor real (no MANUAL)
+            if real_driver_id and real_driver_id != "MANUAL" and real_driver_id != "MANUAL_ENGINE":
+                current_amount = kwh * cp.price_per_kwh
+                self.send_flow_update_to_driver(
+                    driver_id=real_driver_id,
+                    cp_id=cp_id,
+                    flow_rate=1.0,
+                    energy_delivered=kwh,
+                    current_amount=current_amount,
+                    total_amount=cp.total_revenue + current_amount,
+                    location=cp.location,
+                    price_per_kwh=cp.price_per_kwh,
+                    timestamp=datetime.now().isoformat()
+                )
+                logger.info(f"📤 Enviando actualización a driver {real_driver_id} - Energía: {kwh:.2f}kWh")
 
             # Suministro normal en progreso
             cp.last_supply_message = datetime.now()
@@ -1523,20 +1527,22 @@ class EVCentral:
                 status="SUMINISTRANDO",
                 consumption=current_flow_rate,
                 amount=current_amount,
-                driver_id=driver_id
+                driver_id=real_driver_id
             )
             
             cp.total_energy_supplied = kwh
             cp.total_revenue = current_amount
             
-            logger.info(f"⚡ Suministro ACTIVO - CP: {cp_id}, Energía: {kwh:.2f}kWh")
+            logger.info(f"⚡ Suministro ACTIVO - CP: {cp_id}, Energía: {kwh:.2f}kWh, Driver: {real_driver_id}")
             
         except Exception as e:
             logger.error(f"❌ Error procesando mensaje de suministro: {e}")
 
     def send_flow_update_to_driver(self, driver_id: str, cp_id: str, flow_rate: float, 
-                                  energy_delivered: float, current_amount: float, timestamp: str = None):
-        """Envía actualizaciones de caudal al conductor"""
+                              energy_delivered: float, current_amount: float, 
+                              total_amount: float = None, location: str = None,
+                              price_per_kwh: float = None, timestamp: str = None):
+        """Envía actualizaciones de caudal al conductor - VERSIÓN CORREGIDA"""
         try:
             cp = self.database.get_charging_point(cp_id)
             if not cp:
@@ -1550,20 +1556,21 @@ class EVCentral:
                 'flow_rate': flow_rate,
                 'energy_delivered': energy_delivered,
                 'current_amount': current_amount,
-                'total_amount': cp.total_revenue,
-                'location': cp.location,
-                'price_per_kwh': cp.price_per_kwh,
+                'total_amount': total_amount or cp.total_revenue,  # Usar el proporcionado o el del CP
+                'location': location or cp.location,
+                'price_per_kwh': price_per_kwh or cp.price_per_kwh,
                 'timestamp': timestamp or datetime.now().isoformat()
             }
             
             self.kafka_manager.send_message('driver_responses', flow_message)
-            logger.debug(f"📤 Actualización de caudal enviada a driver {driver_id} - Flujo: {flow_rate} kW")
+            logger.debug(f"📤 Actualización de caudal enviada a driver {driver_id} - "
+                    f"Energía: {energy_delivered:.2f}kWh, Importe: €{current_amount:.2f}")
             
         except Exception as e:
             logger.error(f"❌ Error enviando actualización de caudal a driver {driver_id}: {e}", exc_info=True)
 
     def process_driver_request(self, message):
-        """Procesa peticiones de suministro desde app de conductor via Kafka - CORREGIDO"""
+        """Procesa peticiones de suministro desde app de conductor - CORREGIDO"""
         logger.info(f"🎯 process_driver_request llamado con: {message} (TIPO: {type(message)})")
         try:
             # CORRECCIÓN: Manejar tanto diccionarios como strings
@@ -1582,19 +1589,26 @@ class EVCentral:
             cp_id = message.get('cp_id')
             request_type = message.get('type', 'SUPPLY_REQUEST')
             
-            if not driver_id or not cp_id:
-                logger.error("❌ Parámetros insuficientes en petición de conductor")
+            # 🎯 CORRECCIÓN: Validación mejorada
+            if not driver_id:
+                logger.error("❌ Parámetros insuficientes: falta driver_id")
                 return
-            
-            logger.info(f"📨 Petición de conductor recibida - Driver: {driver_id}, CP: {cp_id}")
+                
+            logger.info(f"📨 Petición de conductor recibida - Driver: {driver_id}, Tipo: {request_type}, CP: {cp_id}")
             
             if request_type == 'SUPPLY_REQUEST':
+                if not cp_id:
+                    logger.error("❌ Parámetros insuficientes: falta cp_id en SUPPLY_REQUEST")
+                    return
                 self.handle_driver_supply_request(driver_id, cp_id)
+                
             elif request_type == 'STATUS_QUERY':
-                self.handle_driver_status_query(driver_id, cp_id)
+                logger.info(f"🔍 Procesando STATUS_QUERY para driver {driver_id}")
+                self.handle_driver_status_query(driver_id, cp_id)  # cp_id puede ser None
+                
             else:
                 logger.warning(f"⚠️ Tipo de petición desconocido: {request_type}")
-                
+                    
         except Exception as e:
             logger.error(f"❌ Error procesando petición de conductor: {e}", exc_info=True)
     
@@ -1673,7 +1687,14 @@ class EVCentral:
     def authorize_cp_supply(self, cp_id: str, driver_id: str) -> bool:
         """Autoriza suministro en el CP via socket Y Kafka"""
         try:
+            # OBTENER el punto de carga PRIMERO
+            cp = self.database.get_charging_point(cp_id)
+            if not cp:
+                logger.error(f"❌ CP {cp_id} no encontrado para autorización")
+                return False
 
+            # Resetear contadores
+            cp.driver_id = driver_id
             cp.supply_ended_time = None
             cp.supply_ending = False
             cp.last_supply_message = None
@@ -1682,7 +1703,7 @@ class EVCentral:
             # Enviar comando START por Kafka
             control_message = {
                 'cp_id': cp_id,
-                'command': 'START',  # Comando para iniciar suministro
+                'command': 'START',
                 'driver_id': driver_id,
                 'timestamp': datetime.now().isoformat(),
                 'source': 'central'
@@ -1691,14 +1712,13 @@ class EVCentral:
             logger.info(f"📤 Comando START enviado a CP {cp_id} via Kafka")
             
             # También enviar por socket (backup)
-            cp = self.database.get_charging_point(cp_id)
             if cp and cp.socket_connection:
                 try:
                     auth_message = f"SUMINISTRO_AUTORIZADO#{driver_id}"
                     cp.socket_connection.send(auth_message.encode('utf-8'))
                     logger.info(f"📤 Comando enviado a CP {cp_id} via socket")
-                except:
-                    logger.warning(f"⚠️ No se pudo enviar comando via socket a CP {cp_id}")
+                except Exception as e:
+                    logger.warning(f"⚠️ No se pudo enviar comando via socket a CP {cp_id}: {e}")
             
             self.update_cp_status(cp_id, "SUMINISTRANDO", driver_id=driver_id)
             logger.info(f"✅ Suministro autorizado para CP {cp_id} - Conductor: {driver_id}")
