@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ev_central.py
 
 import os
 import sys
@@ -10,16 +11,49 @@ import logging
 from datetime import datetime
 from typing import Dict, List, Optional
 
-# Configuración de logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('central.log'),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
-logger = logging.getLogger('EV_Central')
+# Configuración de logging MEJORADA para Docker
+def setup_logging():
+    """Configuración robusta de logging con soporte para Docker"""
+    # Usar variable de entorno o valor por defecto
+    log_dir = os.getenv('LOG_DIR', '/app/logs')
+    
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+        print(f"📁 Directorio de logs creado: {log_dir}")
+    
+    # Formato de logs
+    log_format = '%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s'
+    
+    # Configurar logger principal
+    logger = logging.getLogger('EV_Central')
+    logger.setLevel(logging.DEBUG)
+    
+    # Evitar logs duplicados
+    if logger.hasHandlers():
+        logger.handlers.clear()
+    
+    # Handler para archivo
+    log_file = os.path.join(log_dir, 'central.log')
+    file_handler = logging.FileHandler(log_file, encoding='utf-8')
+    file_handler.setLevel(logging.DEBUG)
+    file_formatter = logging.Formatter(log_format)
+    file_handler.setFormatter(file_formatter)
+    
+    # Handler para consola
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)
+    console_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    console_handler.setFormatter(console_formatter)
+    
+    # Agregar handlers
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+    
+    print(f"✅ Logging configurado - Archivo: {log_file}")
+    return logger
+
+# Inicializar logger
+logger = setup_logging()
 
 class ChargingPoint:
     """Clase que representa un punto de carga"""
@@ -74,42 +108,139 @@ class ChargingPoint:
 class DatabaseManager:
     """Gestor de base de datos con persistencia en archivo JSON"""
     
-    def __init__(self, data_file: str = "ev_central_data.json"):
+    def __init__(self, data_file: str = None):
+        # Usar variable de entorno o valor por defecto
+        if data_file is None:
+            data_file = os.getenv('DATA_FILE', '/app/data/ev_central_data.json')
+        
         self.data_file = data_file
         self.charging_points: Dict[str, ChargingPoint] = {}
         self.drivers = set()
         self.transactions = []
         
-        # Cargar datos al iniciar
-        self.load_data()
+        # Crear directorio del archivo de datos si no existe
+        data_dir = os.path.dirname(self.data_file)
+        if data_dir and not os.path.exists(data_dir):
+            os.makedirs(data_dir)
+            logger.info(f"📁 Directorio de datos creado: {data_dir}")
+        
+        # Solo cargar datos existentes, sin inicializar datos de ejemplo
+        data_loaded = self.load_data()
+        
+        if not data_loaded:
+            logger.info("🚀 Sistema iniciado sin datos previos. Esperando registro de puntos de carga...")
     
     def load_data(self):
-        """Carga los datos desde el archivo JSON"""
+        """Carga los datos desde el archivo JSON o backup más reciente"""
         try:
+            # Primero intentar cargar el archivo principal
             if os.path.exists(self.data_file):
-                with open(self.data_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                
-                # Cargar puntos de carga
-                for cp_data in data.get('charging_points', []):
-                    cp = ChargingPoint.unparse(cp_data)
-                    self.charging_points[cp.cp_id] = cp
-                
-                # Cargar conductores
-                self.drivers = set(data.get('drivers', []))
-                
-                # Cargar transacciones
-                self.transactions = data.get('transactions', [])
-                
-                logger.info(f"Datos cargados desde {self.data_file}: {len(self.charging_points)} CPs, {len(self.drivers)} conductores")
-            else:
-                logger.info("Archivo de datos no encontrado. Se iniciará con datos vacíos.")
-                self.initialize_sample_data()
-                
+                logger.info(f"📁 Intentando cargar datos desde {self.data_file}")
+                data = self._load_json_file(self.data_file)
+                if data is not None:
+                    self._process_loaded_data(data)
+                    logger.info(f"✅ Datos cargados desde {self.data_file}: {len(self.charging_points)} CPs, {len(self.drivers)} conductores")
+                    return True
+            
+            # Si el archivo principal no existe o está corrupto, buscar backups
+            logger.info("🔍 Buscando backups disponibles...")
+            backup_file = self._find_latest_backup()
+            if backup_file:
+                logger.info(f"🔄 Cargando desde backup: {backup_file}")
+                backup_data = self._load_json_file(backup_file)
+                if backup_data is not None:
+                    self._process_loaded_data(backup_data)
+                    # Restaurar el backup como archivo principal
+                    self._restore_from_backup(backup_file)
+                    logger.info(f"✅ Datos cargados desde backup: {backup_file}")
+                    return True
+            
+            # No hay datos existentes - esto es normal al iniciar por primera vez
+            logger.info("📭 No se encontraron datos existentes ni backups. Sistema iniciado sin datos.")
+            return False
+                    
         except Exception as e:
-            logger.error(f"Error cargando datos: {e}")
-            # Inicializar con datos de ejemplo si hay error
-            self.initialize_sample_data()
+            logger.error(f"❌ Error cargando datos: {e}", exc_info=True)
+            return False
+
+    def _load_json_file(self, file_path: str) -> Optional[dict]:
+        """Carga un archivo JSON de forma segura"""
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            # Validar estructura básica
+            if not isinstance(data, dict):
+                logger.error(f"❌ Estructura inválida en {file_path}")
+                return None
+                
+            return data
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ JSON corrupto en {file_path}: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"❌ Error leyendo {file_path}: {e}")
+            return None
+
+    def _process_loaded_data(self, data: dict):
+        """Procesa los datos cargados del JSON"""
+        # Cargar puntos de carga
+        self.charging_points.clear()
+        for cp_data in data.get('charging_points', []):
+            try:
+                cp = ChargingPoint.unparse(cp_data)
+                self.charging_points[cp.cp_id] = cp
+            except Exception as e:
+                logger.error(f"❌ Error cargando CP {cp_data.get('cp_id', 'desconocido')}: {e}")
+        
+        # Cargar conductores
+        self.drivers = set(data.get('drivers', []))
+        
+        # Cargar transacciones
+        self.transactions = data.get('transactions', [])
+        
+        logger.info(f"📊 Datos procesados: {len(self.charging_points)} CPs, {len(self.drivers)} conductores, {len(self.transactions)} transacciones")
+
+    def _find_latest_backup(self) -> Optional[str]:
+        """Encuentra el backup más reciente"""
+        try:
+            backup_dir = os.getenv('BACKUP_DIR', '/app/backups')
+            if not os.path.exists(backup_dir):
+                logger.warning(f"📁 Directorio de backups no encontrado: {backup_dir}")
+                return None
+            
+            # Buscar archivos de backup
+            backup_files = []
+            for filename in os.listdir(backup_dir):
+                if filename.startswith('ev_central_backup_') and filename.endswith('.json'):
+                    file_path = os.path.join(backup_dir, filename)
+                    if os.path.isfile(file_path):
+                        backup_files.append(file_path)
+            
+            if not backup_files:
+                logger.info("📁 No se encontraron archivos de backup")
+                return None
+            
+            # Ordenar por fecha de modificación (más reciente primero)
+            backup_files.sort(key=os.path.getmtime, reverse=True)
+            latest_backup = backup_files[0]
+            
+            logger.info(f"📦 Backup más reciente encontrado: {latest_backup}")
+            return latest_backup
+            
+        except Exception as e:
+            logger.error(f"❌ Error buscando backups: {e}")
+            return None
+
+    def _restore_from_backup(self, backup_file: str):
+        """Restaura el archivo principal desde un backup"""
+        try:
+            import shutil
+            shutil.copy2(backup_file, self.data_file)
+            logger.info(f"🔄 Backup restaurado como archivo principal: {backup_file} -> {self.data_file}")
+        except Exception as e:
+            logger.error(f"❌ Error restaurando backup: {e}")
     
     def save_data(self):
         """Guarda los datos en el archivo JSON"""
@@ -121,37 +252,36 @@ class DatabaseManager:
                 'last_save': datetime.now().isoformat()
             }
             
-            # Convertir puntos de carga a diccionarios
             for cp in self.charging_points.values():
                 cp_data = cp.parse()
                 data['charging_points'].append(cp_data)
             
-            # Guardar en archivo
             with open(self.data_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
             
-            logger.info(f"Datos guardados en {self.data_file}")
+            logger.info(f"💾 Datos guardados en {self.data_file}")
             
         except Exception as e:
-            logger.error(f"Error guardando datos: {e}")
+            logger.error(f"❌ Error guardando datos: {e}", exc_info=True)
     
-    def initialize_sample_data(self):
-        """Inicializa datos de ejemplo si no hay archivo"""
-        sample_cps = [
-            ChargingPoint("CP001", "Plaza Mayor", 0.45),
-            ChargingPoint("CP002", "Avenida Central", 0.42),
-            ChargingPoint("CP003", "Estación Norte", 0.48)
-        ]
+    def add_charging_point(self, cp: ChargingPoint) -> bool:
+        """Añade un punto de carga Y guarda automáticamente. Retorna True si fue exitoso."""
+        # Verificar si el CP ya existe
+        if cp.cp_id in self.charging_points:
+            existing_cp = self.charging_points[cp.cp_id]
+            logger.warning(f"⚠️ Intento de registrar CP duplicado: {cp.cp_id} - "
+                          f"Estado actual: {existing_cp.status}, "
+                          f"Ubicación: {existing_cp.location}")
+            return False
         
-        for cp in sample_cps:
-            self.add_charging_point(cp)
-        
-        logger.info("Datos de ejemplo inicializados")
-    
-    def add_charging_point(self, cp: ChargingPoint):
         self.charging_points[cp.cp_id] = cp
-        logger.info(f"Punto de carga {cp.cp_id} agregado a la BD")
+        logger.info(f"➕ Punto de carga {cp.cp_id} registrado - Ubicación: {cp.location}, Precio: €{cp.price_per_kwh}/kWh")
         self.save_data()
+        return True
+    
+    def cp_exists(self, cp_id: str) -> bool:
+        """Verifica si un CP ya existe en la base de datos"""
+        return cp_id in self.charging_points
     
     def get_charging_point(self, cp_id: str) -> Optional[ChargingPoint]:
         return self.charging_points.get(cp_id)
@@ -160,8 +290,9 @@ class DatabaseManager:
         return [cp.parse() for cp in self.charging_points.values()]
     
     def register_driver(self, driver_id: str):
+        """Registra un conductor Y guarda automáticamente"""
         self.drivers.add(driver_id)
-        logger.info(f"Conductor {driver_id} registrado")
+        logger.info(f"👤 Conductor {driver_id} registrado")
         self.save_data()
     
     def add_transaction(self, transaction_data: dict):
@@ -173,59 +304,147 @@ class DatabaseManager:
         """Crea una copia de seguridad de los datos"""
         if backup_file is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            backup_file = f"ev_central_backup_{timestamp}.json"
+            backup_dir = os.getenv('BACKUP_DIR', '/app/backups')
+            if not os.path.exists(backup_dir):
+                os.makedirs(backup_dir)
+            backup_file = os.path.join(backup_dir, f"ev_central_backup_{timestamp}.json")
         
         try:
             self.save_data()
             import shutil
             shutil.copy2(self.data_file, backup_file)
-            logger.info(f"Copia de seguridad creada: {backup_file}")
+            logger.info(f"📦 Copia de seguridad creada: {backup_file}")
             return True
         except Exception as e:
-            logger.error(f"Error creando copia de seguridad: {e}")
+            logger.error(f"❌ Error creando copia de seguridad: {e}", exc_info=True)
             return False
 
-class SimpleKafkaManager:
-    """Simulador de Kafka para desarrollo"""
+import json
+from kafka import KafkaProducer, KafkaConsumer
+from kafka.errors import KafkaError
+
+class RealKafkaManager:
+    """Gestor de Kafka real para producción"""
     
     def __init__(self, bootstrap_servers: str):
         self.bootstrap_servers = bootstrap_servers
-        self.topics = {
-            'cp_registrations': [],
-            'cp_status_updates': [],
-            'central_responses': [],
-            'driver_requests': [],
-            'driver_responses': [],
-            'central_updates': [],
-            'control_commands': [],
-            'supply_flow': [],  # Mensajes de caudal del Engine
-        }
-        logger.info(f"Kafka simulado en {bootstrap_servers}")
+        self.producer = None
+        self.consumers = {}
+        
+        try:
+            # Inicializar producer
+            self.producer = KafkaProducer(
+                bootstrap_servers=[self.bootstrap_servers],
+                value_serializer=lambda v: json.dumps(v).encode('utf-8'),
+                retries=3,
+                acks='all'
+            )
+            
+            logger.info(f"🔌 Kafka REAL conectado en {bootstrap_servers}")
+            
+        except Exception as e:
+            logger.error(f"❌ Error conectando a Kafka: {e}")
+            raise
     
     def send_message(self, topic: str, message: dict):
-        """Envía mensaje a topic simulado"""
-        if topic in self.topics:
-            self.topics[topic].append({
-                'timestamp': datetime.now(),
-                'message': message
-            })
-            logger.debug(f"Mensaje simulado enviado a {topic}: {message}")
-        else:
-            logger.warning(f"Topic {topic} no existe")
+        """Envía mensaje a topic real de Kafka"""
+        try:
+            if self.producer:
+                future = self.producer.send(topic, message)
+                self.producer.flush()
+                logger.debug(f"📤 Mensaje REAL enviado a {topic}: {message}")
+            else:
+                logger.error("❌ Producer de Kafka no inicializado")
+                
+        except KafkaError as e:
+            logger.error(f"❌ Error enviando mensaje a Kafka: {e}")
+        except Exception as e:
+            logger.error(f"❌ Error inesperado enviando mensaje: {e}")
     
     def get_messages(self, topic: str, consumer_group: str = None):
-        """Obtiene mensajes de un topic y los elimina de la cola (simulación de consumo)"""
-        if topic in self.topics:
-            messages = self.topics[topic].copy()
-            self.topics[topic].clear()  # Simular que los mensajes fueron consumidos
+        """Obtiene mensajes de un topic real de Kafka - CORREGIDO"""
+        try:
+            logger.info(f"🔍 get_messages llamado para topic: {topic}")
+            
+            if topic not in self.consumers:
+                logger.info(f"🆕 Creando nuevo consumer para: {topic}")
+                group_id = consumer_group or f"central_{topic}_group"
+                self.consumers[topic] = KafkaConsumer(
+                    topic,
+                    bootstrap_servers=[self.bootstrap_servers],
+                    auto_offset_reset='earliest',
+                    enable_auto_commit=True,
+                    auto_commit_interval_ms=1000,
+                    group_id=group_id,
+                    value_deserializer=lambda x: x.decode('utf-8') if x else None,
+                    consumer_timeout_ms=1000
+                )
+                logger.info(f"✅ Consumer creado para {topic}, group: {group_id}")
+            
+            consumer = self.consumers[topic]
+            messages = []
+            
+            logger.info(f"📥 Polling mensajes de {topic}...")
+            try:
+                records = consumer.poll(timeout_ms=2000)
+            except Exception as e:
+                if "KafkaConsumer is closed" in str(e):
+                    logger.warning(f"🔄 Consumer cerrado, recreando para {topic}")
+                    del self.consumers[topic]
+                    return self.get_messages(topic, consumer_group)
+                else:
+                    raise e
+            
+            logger.info(f"📊 Poll result: {len(records)} partitions con mensajes")
+            
+            for topic_partition, message_batch in records.items():
+                logger.info(f"   📦 Partition {topic_partition}: {len(message_batch)} mensajes")
+                for message in message_batch:
+                    if message.value:
+                        try:
+                            # PARSEAR MANUALMENTE el JSON
+                            if isinstance(message.value, str):
+                                message_dict = json.loads(message.value)
+                            else:
+                                message_dict = json.loads(message.value.decode('utf-8'))
+                            
+                            messages.append({
+                                'timestamp': datetime.fromtimestamp(message.timestamp / 1000),
+                                'message': message_dict
+                            })
+                            logger.info(f"   📨 Mensaje recibido (TIPO: {type(message_dict)}): {message_dict}")
+                        except json.JSONDecodeError as e:
+                            logger.error(f"❌ Error parseando JSON: {e} - Mensaje: {message.value}")
+                        except Exception as e:
+                            logger.error(f"❌ Error procesando mensaje: {e} - Mensaje: {message.value}")
+            
+            if messages:
+                logger.info(f"✅ {len(messages)} mensajes REALES consumidos de {topic}")
+            else:
+                logger.info(f"📭 No hay mensajes en {topic}")
+            
             return messages
-        return []
+            
+        except Exception as e:
+            logger.error(f"❌ Error en get_messages para {topic}: {e}", exc_info=True)
+            # Si el consumer está cerrado, eliminarlo para recrearlo en el próximo intento
+            if topic in self.consumers and "closed" in str(e).lower():
+                logger.warning(f"🗑️ Eliminando consumer cerrado para {topic}")
+                del self.consumers[topic]
+            return []
     
-    def peek_messages(self, topic: str):
-        """Mira los mensajes sin consumirlos"""
-        if topic in self.topics:
-            return self.topics[topic].copy()
-        return []
+    def close(self):
+        """Cierra las conexiones de Kafka"""
+        try:
+            if self.producer:
+                self.producer.close()
+            
+            for consumer in self.consumers.values():
+                consumer.close()
+                
+            logger.info("🔌 Conexiones de Kafka cerradas")
+        except Exception as e:
+            logger.error(f"❌ Error cerrando conexiones Kafka: {e}")
 
 class SocketServer:
     """Servidor de sockets para comunicación directa"""
@@ -246,7 +465,7 @@ class SocketServer:
             self.socket.listen(5)
             self.running = True
             
-            logger.info(f"Servidor socket iniciado en {self.host}:{self.port}")
+            logger.info(f"🔌 Servidor socket iniciado en {self.host}:{self.port}")
             
             while self.running:
                 client_socket, address = self.socket.accept()
@@ -258,12 +477,12 @@ class SocketServer:
                 client_thread.start()
                 
         except Exception as e:
-            logger.error(f"Error en servidor socket: {e}")
+            logger.error(f"❌ Error en servidor socket: {e}", exc_info=True)
     
     def handle_client(self, client_socket, address):
         """Maneja conexiones de clientes"""
         try:
-            logger.info(f"Conexión establecida desde {address}")
+            logger.info(f"🔗 Conexión establecida desde {address}")
             
             while True:
                 data = client_socket.recv(1024).decode('utf-8')
@@ -273,124 +492,149 @@ class SocketServer:
                 self.process_message(data, client_socket)
                 
         except Exception as e:
-            logger.error(f"Error manejando cliente {address}: {e}")
+            logger.error(f"❌ Error manejando cliente {address}: {e}", exc_info=True)
         finally:
             client_socket.close()
-            logger.info(f"Conexión cerrada con {address}")
+            logger.info(f"🔌 Conexión cerrada con {address}")
     
     def process_message(self, message: str, client_socket):
         """Procesa mensajes recibidos por socket"""
         try:
-            # Formato simplificado: operacion#param1#param2
             if message.startswith('REGISTER_CP'):
                 parts = message.split('#')
                 self.handle_cp_registration(parts[1:], client_socket)
-            # REACTIVACIÓN CP_OK
             elif message.startswith('CP_OK'):
                 parts = message.split('#')
-                self.handle_cp_ok(parts[1:])
-            # DETECCIÓN DE AVERÍA CP_KO
+                self.handle_cp_ok(parts[1:],client_socket)
             elif message.startswith('CP_KO'):
                 parts = message.split('#')
                 self.handle_cp_failure(parts[1:], client_socket)
             else:
-                logger.warning(f"Mensaje desconocido: {message}")
+                logger.warning(f"⚠️ Mensaje desconocido: {message}")
             
         except Exception as e:
-            logger.error(f"Error procesando mensaje: {e}")
+            logger.error(f"❌ Error procesando mensaje: {e}", exc_info=True)
     
     def handle_cp_registration(self, params: List[str], client_socket):
         """Maneja registro de puntos de carga"""
         if len(params) < 3:
-            logger.error("Parámetros insuficientes para registro")
+            logger.error("❌ Parámetros insuficientes para registro")
+            response = "ERROR#Parámetros_insuficientes"
+            client_socket.send(response.encode('utf-8'))
             return
             
         cp_id = params[0]
         location = params[1]
         price = float(params[2])
         
+        # ================================================================
+        # 🎯 CORRECCIÓN: Condición lógica corregida - usar 'and' en lugar de 'or'
+        # ================================================================
+        if self.central.database.cp_exists(cp_id) and self.central.database.get_charging_point(cp_id).status not in ["AVERIADO", "DESCONECTADO"]:
+            logger.warning(f"⚠️ Intento de registrar CP duplicado via socket: {cp_id}")
+            response = f"ERROR#CP_ya_registrado#{cp_id}"
+            client_socket.send(response.encode('utf-8'))
+            return
+        
         cp = ChargingPoint(cp_id, location, price)
         cp.socket_connection = client_socket
         cp.last_heartbeat = datetime.now()
         
-        self.central.database.add_charging_point(cp)
-        
-        self.central.update_cp_status(cp_id, "DESCONECTADO")
-        
-        self.central.database.save_data()
-        
-        response = "REGISTER_OK"
-        client_socket.send(response.encode('utf-8'))
-        
-        logger.info(f"Punto de carga {cp_id} registrado correctamente")
+        # Intentar agregar el CP (con validación duplicada por seguridad)
+        if self.central.database.add_charging_point(cp):
+            self.central.update_cp_status(cp_id, "DESCONECTADO")
+            response = "REGISTER_OK"
+            client_socket.send(response.encode('utf-8'))
+            logger.info(f"✅ Punto de carga {cp_id} registrado correctamente via socket")
+        else:
+            # Esto no debería pasar porque ya verificamos, pero por seguridad
+            response = f"ERROR#CP_ya_registrado#{cp_id}"
+            client_socket.send(response.encode('utf-8'))
+            logger.error(f"❌ Error inesperado registrando CP {cp_id}")
     
-    def handle_cp_ok(self, params: List[str]):
-        """Maneja ok de puntos de carga"""
+    def handle_cp_ok(self, params: List[str], client_socket):
+        """Maneja ok de puntos de carga y envía confirmación"""
         if params:
             cp_id = params[0]
             cp = self.central.database.get_charging_point(cp_id)
+            if not cp:
+                logger.warning(f"⚠️ CP {cp_id} no registrado - Solicitando registro")
+                response = f"ERROR#CP_no_registrado#SOLICITAR_REGISTRO#{cp_id}"
+                client_socket.send(response.encode('utf-8'))
+                logger.info(f"📋 Solicitando registro a CP no registrado: {cp_id}")
+                return
+                
             if cp:
                 cp.last_heartbeat = datetime.now()
-                # ACTUALIZAR ESTADO A ACTIVADO SI ESTABA DESCONECTADO O AVERIADO
+            
+                status_changed = False
                 if cp.status == "DESCONECTADO":
                     self.central.update_cp_status(cp_id, "ACTIVADO")
-                    logger.info(f"CP {cp_id} reactivado - Estado cambiado a ACTIVADO")
+                    logger.info(f"🔄 CP {cp_id} reactivado - Estado cambiado a ACTIVADO")
+                    status_changed = True
                 elif cp.status == "AVERIADO":
                     self.central.update_cp_status(cp_id, "ACTIVADO")
-                    logger.info(f"CP {cp_id} reactivado - Estado anterior AVERIADO cambiado a ACTIVADO")
+                    logger.info(f"🔄 CP {cp_id} reactivado - Estado anterior AVERIADO cambiado a ACTIVADO")
+                    status_changed = True
                 
-                logger.debug(f"Heartbeat recibido de {cp_id}")
-            
+                response = f"CP_OK_ACK#{cp_id}"
+                if status_changed:
+                    response += "#ESTADO_ACTUALIZADO"
+                
+                client_socket.send(response.encode('utf-8'))
+                logger.debug(f"💓 Heartbeat recibido de {cp_id} - Confirmación enviada")
+                
+            else:
+                # CP no encontrado - enviar error
+                response = f"ERROR#CP_no_encontrado#{cp_id}"
+                client_socket.send(response.encode('utf-8'))
+                logger.error(f"❌ CP {cp_id} no encontrado para mensaje CP_OK")
+
     def handle_cp_failure(self, params: List[str], client_socket):
         """Maneja mensajes de avería CP_KO"""
         if not params:
-            logger.error("Parámetros insuficientes para mensaje CP_KO")
+            logger.error("❌ Parámetros insuficientes para mensaje CP_KO")
             return
             
         cp_id = params[0]
         reason = params[1] if len(params) > 1 else "Avería no especificada"
         
-        logger.warning(f"CP {cp_id} reporta avería: {reason}")
+        logger.warning(f"⚠️ CP {cp_id} reporta avería: {reason}")
         
-        # Obtener el CP de la base de datos
         cp = self.central.database.get_charging_point(cp_id)
         if cp:
-            # Verificar si estaba suministrando
             was_supplying = cp.status == "SUMINISTRANDO"
             driver_id = cp.driver_id
             
-            # Poner en estado de avería
             self.central.update_cp_status(cp_id, "AVERIADO")
             
-            # Si estaba suministrando, registrar transacción fallida
             if was_supplying and driver_id:
                 self.central.record_failed_transaction(cp, reason, driver_id)
-                logger.info(f"Suministro interrumpido para conductor {driver_id} por avería en CP {cp_id}")
+                logger.info(f"🔌 Suministro interrumpido para conductor {driver_id} por avería en CP {cp_id}")
             
-            # Enviar confirmación
             response = f"CP_KO_ACK#{cp_id}"
             client_socket.send(response.encode('utf-8'))
             
-            logger.info(f"CP {cp_id} puesto en estado AVERIADO")
+            logger.info(f"🔴 CP {cp_id} puesto en estado AVERIADO")
         else:
-            logger.error(f"CP {cp_id} no encontrado para mensaje CP_KO")
+            logger.error(f"❌ CP {cp_id} no encontrado para mensaje CP_KO")
             response = f"ERROR#CP_no_encontrado"
             client_socket.send(response.encode('utf-8'))
 
 class EVCentral:
     """Clase principal del sistema central con persistencia"""
     
-    def __init__(self, socket_host: str, socket_port: int, kafka_servers: str, data_file: str = "ev_central_data.json"):
+    def __init__(self, socket_host: str, socket_port: int, kafka_servers: str, data_file: str = None):
         self.database = DatabaseManager(data_file)
-        self.kafka_manager = SimpleKafkaManager(kafka_servers)
+        
+        # Usar Kafka REAL en lugar del simulado
+        self.kafka_manager = RealKafkaManager(kafka_servers)
+        
         self.socket_server = SocketServer(socket_host, socket_port, self)
         self.auto_save_interval = 300
         self.running = False
         
-        # Registrar manejador de señales para apagado graceful
         self.setup_signal_handlers()
-        
-        # Iniciar consumidor de Kafka para registros de CPs
         self.start_kafka_consumer()
     
     def setup_signal_handlers(self):
@@ -400,52 +644,128 @@ class EVCentral:
             signal.signal(signal.SIGINT, self.graceful_shutdown)
             signal.signal(signal.SIGTERM, self.graceful_shutdown)
         except AttributeError:
-            # Windows no tiene todas las señales UNIX
             pass
     
     def graceful_shutdown(self, signum=None, frame=None):
         """Cierre graceful guardando todos los datos"""
-        logger.info("Iniciando apagado graceful...")
+        logger.info("🛑 Iniciando apagado graceful...")
         self.running = False
         
-        # Guardar datos finales
+        # Cerrar conexiones Kafka
+        if hasattr(self, 'kafka_manager'):
+            self.kafka_manager.close()
+        
         self.database.save_data()
-        logger.info("Datos guardados correctamente")
-        
-        # Crear copia de seguridad
+        logger.info("💾 Datos guardados correctamente")
         self.database.backup_data()
-        
-        logger.info("EV_Central apagado correctamente")
+        logger.info("✅ EV_Central apagado correctamente")
         sys.exit(0)
-    
+
+    def test_kafka_connection(self):
+        """Test para verificar la conexión a Kafka"""
+        try:
+            logger.info("🧪 Probando conexión Kafka...")
+            
+            # Enviar mensaje de prueba
+            test_message = {
+                'test': True,
+                'timestamp': datetime.now().isoformat(),
+                'message': 'Test de conexión Kafka'
+            }
+            
+            self.kafka_manager.send_message('test_topic', test_message)
+            logger.info("✅ Mensaje de prueba enviado a Kafka")
+            
+            # Intentar consumir (puede que no haya mensajes, pero verifica la conexión)
+            test_messages = self.kafka_manager.get_messages('test_topic', 'test_group')
+            logger.info(f"📥 Test - Mensajes recibidos: {len(test_messages)}")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Test de Kafka falló: {e}")
+            return False
+
+    def test_kafka_detailed(self):
+        """Test detallado de Kafka"""
+        try:
+            logger.info("🧪 INICIANDO TEST KAFKA DETALLADO...")
+            
+            # 1. Verificar que podemos enviar
+            test_msg = {
+                'test': True,
+                'timestamp': datetime.now().isoformat(),
+                'source': 'central_test'
+            }
+            
+            logger.info("📤 Enviando mensaje de test a supply_response...")
+            self.kafka_manager.send_message('supply_response', test_msg)
+            logger.info("✅ Mensaje enviado")
+            
+            # 2. Verificar que podemos recibir
+            logger.info("📥 Intentando recibir mensajes...")
+            messages = self.kafka_manager.get_messages('supply_response')
+            logger.info(f"📦 Mensajes recibidos: {len(messages)}")
+            
+            # 3. Verificar conexión directa
+            from kafka import KafkaConsumer
+            logger.info("🔍 Probando conexión directa...")
+            test_consumer = KafkaConsumer(
+                'supply_response',
+                bootstrap_servers=[self.kafka_manager.bootstrap_servers],
+                auto_offset_reset='earliest',
+                enable_auto_commit=False,
+                group_id='test_direct_group',
+                consumer_timeout_ms=3000
+            )
+            
+            available = list(test_consumer)
+            logger.info(f"👀 Mensajes disponibles (directo): {len(available)}")
+            test_consumer.close()
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Test Kafka falló: {e}", exc_info=True)
+            return False
+
     def start(self):
         """Inicia todos los servicios del sistema central"""
-        logger.info("Iniciando EV_Central...")
+        logger.info("🚀 Iniciando EV_Central...")
         self.running = True
         
-        # Iniciar servidor de sockets en hilo separado
-        socket_thread = threading.Thread(target=self.socket_server.start)
-        socket_thread.daemon = True
+        # Test de Kafka
+        self.test_kafka_connection()
+        self.test_kafka_detailed()
+        
+        # Iniciar todos los hilos
+        socket_thread = threading.Thread(target=self.socket_server.start, daemon=True)
         socket_thread.start()
         
-        # Iniciar monitor de heartbeats
-        heartbeat_thread = threading.Thread(target=self.monitor_heartbeats)
-        heartbeat_thread.daemon = True
+        heartbeat_thread = threading.Thread(target=self.monitor_heartbeats, daemon=True)
         heartbeat_thread.start()
         
-        # Iniciar guardado automático
-        autosave_thread = threading.Thread(target=self.auto_save)
-        autosave_thread.daemon = True
+        autosave_thread = threading.Thread(target=self.auto_save, daemon=True)
         autosave_thread.start()
         
-        # Mostrar panel de control
+        # Kafka consumer en hilo NO daemon
+        self.start_kafka_consumer()
+        
+        # Console input en hilo separado
+        console_thread = threading.Thread(target=self.handle_console_input, daemon=True)
+        console_thread.start()
+        
         self.show_control_panel()
         
-        # Iniciar manejo de consola
-        self.handle_console_input()
+        logger.info("✅ EV_Central iniciado correctamente")
         
-        logger.info("EV_Central iniciado correctamente")
-    
+        # Mantener hilo principal vivo
+        try:
+            while self.running:
+                time.sleep(0.1)
+        except KeyboardInterrupt:
+            self.graceful_shutdown()
+
     def show_control_panel(self):
         """Muestra el panel de control en consola"""
         print("\n" + "="*80)
@@ -454,7 +774,6 @@ class EVCentral:
         print("Estados: 🟢 ACTIVADO | 🟠 PARADO | 🔵 SUMINISTRANDO | 🔴 AVERIADO | ⚫ DESCONECTADO")
         print("="*80)
         
-        # Hilo para actualizar el panel periódicamente
         def update_panel():
             while self.running:
                 self.display_status()
@@ -465,13 +784,14 @@ class EVCentral:
         panel_thread.start()
     
     def display_status(self):
-        """Muestra el estado actual del sistema"""
+        """Muestra el estado actual del sistema con información detallada de suministro"""
         os.system('cls' if os.name == 'nt' else 'clear')
-        print("\n" + "="*80)
+        print("\n" + "="*110)
         print("EV_Central - Estado del Sistema")
-        print("="*80)
-        print(f"{'ID':<10} {'Ubicación':<20} {'Estado':<15} {'Caudal':<10} {'Importe':<10} {'Conductor'}")
-        print("-"*80)
+        print("="*110)
+        
+        print(f"{'ID':<8} {'Ubicación':<18} {'Estado':<14} {'Energía':<10} {'Precio':<8} {'Importe':<10} {'Conductor':<12} {'Detalles'}")
+        print("-"*110)
         
         for cp in self.database.charging_points.values():
             status_icon = {
@@ -482,18 +802,37 @@ class EVCentral:
                 "DESCONECTADO": "⚫ DESCONECTADO"
             }.get(cp.status, "⚫ DESCONECTADO")
             
-            # MOSTRAR CAUDAL SI ESTÁ SUMINISTRANDO
-            if cp.status == "SUMINISTRANDO" and cp.current_consumption > 0:
-                caudal = f"{cp.current_consumption:.1f}kW"
-            else:
-                caudal = "-"
-                
-            importe = f"€{cp.current_amount:.2f}" if cp.current_amount > 0 else "-"
+            precio = f"€{cp.price_per_kwh:.2f}"
             conductor = cp.driver_id if cp.driver_id else "-"
             
-            print(f"{cp.cp_id:<10} {cp.location:<20} {status_icon:<15} {caudal:<10} {importe:<10} {conductor}")
+            if cp.status == "SUMINISTRANDO" and cp.total_energy_supplied > 0:
+                # ⭐⭐ INFORMACIÓN DETALLADA PARA CPs SUMINISTRANDO
+                energia = f"{cp.total_energy_supplied:.1f}kWh"
+                importe_actual = f"€{cp.current_amount:.2f}"
+                importe_total = f"€{cp.total_revenue:.2f}"
+                caudal = f"{cp.current_consumption:.1f}kW" if cp.current_consumption > 0 else "0.0kW"
+                
+                detalles = f"Caudal: {caudal} | Sesión: {importe_actual}"
+                
+                print(f"{cp.cp_id:<8} {cp.location:<18} {status_icon:<14} {energia:<10} {precio:<8} {importe_total:<10} {conductor:<12} {detalles}")
+                
+            else:
+                # Información básica para otros estados
+                energia = f"{cp.total_energy_supplied:.1f}kWh" if cp.total_energy_supplied > 0 else "0.0kWh"
+                importe_total = f"€{cp.total_revenue:.2f}" if cp.total_revenue > 0 else "€0.00"
+                
+                if cp.status == "ACTIVADO":
+                    detalles = "🟢 Listo para cargar"
+                elif cp.status == "PARADO":
+                    detalles = "🟠 Parado manualmente"
+                elif cp.status == "AVERIADO":
+                    detalles = "🔴 En avería"
+                else:
+                    detalles = "⚫ Desconectado"
+                
+                print(f"{cp.cp_id:<8} {cp.location:<18} {status_icon:<14} {energia:<10} {precio:<8} {importe_total:<10} {conductor:<12} {detalles}")
         
-        print("="*80)
+        print("="*110)
         print("Comandos disponibles:")
         print("  stop <cp_id>    - Parar un punto de carga")
         print("  resume <cp_id>  - Reanudar un punto de carga")  
@@ -502,8 +841,8 @@ class EVCentral:
         print("  save           - Guardar datos manualmente")
         print("  backup         - Crear copia de seguridad")
         print("  quit           - Salir")
-        print("="*80)
-    
+        print("="*110)
+
     def handle_console_input(self):
         """Maneja la entrada por consola"""
         while self.running:
@@ -516,12 +855,12 @@ class EVCentral:
                     self.display_status()
                 elif command == 'save':
                     self.database.save_data()
-                    print("Datos guardados manualmente")
+                    print("✅ Datos guardados manualmente")
                 elif command == 'backup':
                     if self.database.backup_data():
-                        print("Copia de seguridad creada")
+                        print("✅ Copia de seguridad creada")
                     else:
-                        print("Error creando copia de seguridad")
+                        print("❌ Error creando copia de seguridad")
                 elif command == 'stats':
                     self.show_statistics()
                 elif command.startswith('stop '):
@@ -531,10 +870,10 @@ class EVCentral:
                     cp_id = command[7:].strip().upper()
                     self.send_control_command(cp_id, "RESUME")
                 else:
-                    print("Comando no reconocido. Use 'stop <cp_id>', 'resume <cp_id>', 'status', 'stats', 'save', 'backup' o 'quit'")
+                    print("❌ Comando no reconocido. Use 'stop <cp_id>', 'resume <cp_id>', 'status', 'stats', 'save', 'backup' o 'quit'")
                     
             except Exception as e:
-                logger.error(f"Error procesando comando: {e}")
+                logger.error(f"❌ Error procesando comando: {e}", exc_info=True)
     
     def show_statistics(self):
         """Muestra estadísticas del sistema"""
@@ -564,9 +903,9 @@ class EVCentral:
             time.sleep(self.auto_save_interval)
             try:
                 self.database.save_data()
-                logger.debug("Guardado automático realizado")
+                logger.debug("💾 Guardado automático realizado")
             except Exception as e:
-                logger.error(f"Error en guardado automático: {e}")
+                logger.error(f"❌ Error en guardado automático: {e}", exc_info=True)
     
     def monitor_heartbeats(self):
         """Monitoriza los heartbeats de los CPs"""
@@ -580,26 +919,22 @@ class EVCentral:
                     if time_diff > 60:
                         if cp.status != "DESCONECTADO" and cp.status != "PARADO":
                             self.update_cp_status(cp.cp_id, "DESCONECTADO")
-                            logger.warning(f"CP {cp.cp_id} desconectado - Sin heartbeat")
+                            logger.warning(f"🔴 CP {cp.cp_id} desconectado - Sin heartbeat")
                         elif cp.status == "PARADO":
-                            logger.debug(f"CP {cp.cp_id} está PARADO intencionalmente - Ignorando falta de heartbeat")
+                            logger.debug(f"🟠 CP {cp.cp_id} está PARADO intencionalmente - Ignorando falta de heartbeat")
     
     def update_cp_status(self, cp_id: str, status: str, consumption: float = 0.0, 
                         amount: float = 0.0, driver_id: str = None):
         """Actualiza el estado de un punto de carga"""
         cp = self.database.get_charging_point(cp_id)
         if cp:
-            # Si se cambia a AVERIADO y estaba suministrando, cortar suministro
             if status == "AVERIADO" and cp.status == "SUMINISTRANDO":
-                # Guardar el driver_id antes de resetear
                 affected_driver = cp.driver_id
-                # Resetear valores de suministro
                 cp.current_consumption = 0.0
                 cp.current_amount = 0.0
                 cp.driver_id = None
-                logger.warning(f"Suministro cortado para conductor {affected_driver} - CP {cp_id} en avería")
+                logger.warning(f"🔌 Suministro cortado para conductor {affected_driver} - CP {cp_id} en avería")
             
-            # Si estaba suministrando y ahora para (excepto por avería), registrar transacción
             elif cp.status == "SUMINISTRANDO" and status != "SUMINISTRANDO" and status != "AVERIADO" and cp.current_amount > 0:
                 self.record_transaction(cp, "COMPLETED")
             
@@ -608,37 +943,123 @@ class EVCentral:
             cp.current_amount = amount
             cp.driver_id = driver_id
             
-            # Actualizar estadísticas si está suministrando
             if status == "SUMINISTRANDO" and consumption > 0:
                 cp.total_energy_supplied += consumption / 3600
                 cp.total_revenue += amount
             
-            # Publicar actualización en Kafka simulado
             self.kafka_manager.send_message('central_updates', cp.parse())
-            
-            logger.info(f"Estado actualizado - CP: {cp_id}, Estado: {status}")
+            logger.info(f"🔄 Estado actualizado - CP: {cp_id}, Estado: {status}")
     
-    def record_transaction(self, cp: ChargingPoint, status: str):
-        """Registra una transacción completada"""
+    # ================================================================
+    # 🎯 NUEVO: Método mejorado para registrar transacciones con tickets
+    # ================================================================
+    def record_transaction(self, cp: ChargingPoint, status: str) -> dict:
+        """Registra una transacción completada y retorna los datos"""
+        transaction_id = f"TXN{int(time.time())}"
         transaction = {
-            'transaction_id': f"TXN{int(time.time())}",
+            'transaction_id': transaction_id,
             'cp_id': cp.cp_id,
             'driver_id': cp.driver_id,
-            'energy_consumed': cp.current_consumption,
-            'amount': cp.current_amount,
+            'energy_consumed': cp.total_energy_supplied,
+            'amount': cp.total_revenue,
             'price_per_kwh': cp.price_per_kwh,
             'status': status,
             'start_time': cp.last_heartbeat.isoformat() if cp.last_heartbeat else datetime.now().isoformat(),
-            'end_time': datetime.now().isoformat()
+            'end_time': datetime.now().isoformat(),
+            'location': cp.location
         }
         
         self.database.add_transaction(transaction)
-        logger.info(f"Transacción registrada: {transaction['transaction_id']}")
+        logger.info(f"💰 Transacción registrada: {transaction_id}")
+        
+        return transaction
 
+    # ================================================================
+    # 🎯 NUEVO: Método para enviar tickets al driver
+    # ================================================================
+    def send_ticket_to_driver(self, cp: ChargingPoint, transaction_data: dict):
+        """Envía ticket de transacción al conductor"""
+        try:
+            if not cp.driver_id:
+                logger.warning(f"⚠️ No hay driver_id para enviar ticket del CP {cp.cp_id}")
+                return
+                
+            ticket_message = {
+                'type': 'TRANSACTION_TICKET',
+                'ticket_id': transaction_data['transaction_id'],
+                'driver_id': cp.driver_id,
+                'cp_id': cp.cp_id,
+                'location': cp.location,
+                'energy_consumed_kwh': round(transaction_data['energy_consumed'], 2),
+                'total_amount_eur': round(transaction_data['amount'], 2),
+                'price_per_kwh': cp.price_per_kwh,
+                'start_time': transaction_data['start_time'],
+                'end_time': transaction_data['end_time'],
+                'duration_minutes': self.calculate_duration_minutes(
+                    transaction_data['start_time'], 
+                    transaction_data['end_time']
+                ),
+                'status': 'COMPLETED',
+                'timestamp': datetime.now().isoformat()
+            }
+            
+            self.kafka_manager.send_message('driver_tickets', ticket_message)
+            logger.info(f"🎫 Ticket enviado a driver {cp.driver_id} - Transacción: {transaction_data['transaction_id']}")
+            
+        except Exception as e:
+            logger.error(f"❌ Error enviando ticket a driver {cp.driver_id}: {e}", exc_info=True)
+
+    # ================================================================
+    # 🎯 NUEVO: Método para enviar tickets al engine
+    # ================================================================
+    def send_ticket_to_engine(self, cp: ChargingPoint, transaction_data: dict):
+        """Envía ticket de transacción al engine"""
+        try:
+            ticket_message = {
+                'type': 'TRANSACTION_TICKET',
+                'ticket_id': transaction_data['transaction_id'],
+                'cp_id': cp.cp_id,
+                'energy_consumed_kwh': round(transaction_data['energy_consumed'], 2),
+                'total_amount_eur': round(transaction_data['amount'], 2),
+                'price_per_kwh': cp.price_per_kwh,
+                'start_time': transaction_data['start_time'],
+                'end_time': transaction_data['end_time'],
+                'duration_minutes': self.calculate_duration_minutes(
+                    transaction_data['start_time'], 
+                    transaction_data['end_time']
+                ),
+                'status': 'COMPLETED',
+                'timestamp': datetime.now().isoformat()
+            }
+            
+            self.kafka_manager.send_message('engine_tickets', ticket_message)
+            logger.info(f"🎫 Ticket enviado a engine {cp.cp_id} - Transacción: {transaction_data['transaction_id']}")
+            
+        except Exception as e:
+            logger.error(f"❌ Error enviando ticket a engine {cp.cp_id}: {e}", exc_info=True)
+
+    # ================================================================
+    # 🎯 NUEVO: Método auxiliar para calcular duración
+    # ================================================================
+    def calculate_duration_minutes(self, start_time_str: str, end_time_str: str) -> float:
+        """Calcula la duración en minutos entre dos timestamps"""
+        try:
+            start_time = datetime.fromisoformat(start_time_str)
+            end_time = datetime.fromisoformat(end_time_str)
+            duration = end_time - start_time
+            return round(duration.total_seconds() / 60, 2)
+        except Exception as e:
+            logger.error(f"❌ Error calculando duración: {e}")
+            return 0.0
+
+    # ================================================================
+    # 🎯 MODIFICADO: Método mejorado para transacciones fallidas con tickets
+    # ================================================================
     def record_failed_transaction(self, cp: ChargingPoint, failure_reason: str, driver_id: str):
-        """Registra una transacción fallida por avería"""
+        """Registra una transacción fallida por avería y envía tickets"""
+        transaction_id = f"TXN_FAIL_{int(time.time())}"
         transaction = {
-            'transaction_id': f"TXN_FAIL_{int(time.time())}",
+            'transaction_id': transaction_id,
             'cp_id': cp.cp_id,
             'driver_id': driver_id,
             'energy_consumed': cp.current_consumption,
@@ -647,22 +1068,64 @@ class EVCentral:
             'status': 'FAILED',
             'failure_reason': failure_reason,
             'start_time': cp.last_heartbeat.isoformat() if cp.last_heartbeat else datetime.now().isoformat(),
-            'end_time': datetime.now().isoformat()
+            'end_time': datetime.now().isoformat(),
+            'location': cp.location
         }
         
         self.database.add_transaction(transaction)
-        logger.info(f"Transacción fallida registrada: {transaction['transaction_id']} - Razón: {failure_reason}")
+        logger.info(f"❌ Transacción fallida registrada: {transaction_id} - Razón: {failure_reason}")
         
-        # Resetear valores actuales del CP
-        cp.current_consumption = 0.0
-        cp.current_amount = 0.0
-        cp.driver_id = None
+        # Enviar tickets de transacción fallida
+        if driver_id:
+            self.send_failed_ticket_to_driver(cp, transaction, failure_reason)
+        self.send_failed_ticket_to_engine(cp, transaction, failure_reason)
+        
+        self.update_cp_status(
+            cp_id=cp.cp_id,
+            status="AVERIADO",
+            consumption=0.0,
+            amount=0.0,
+            driver_id=None
+        )
+
+    # ================================================================
+    # 🎯 NUEVO: Método para tickets fallidos al driver
+    # ================================================================
+    def send_failed_ticket_to_driver(self, cp: ChargingPoint, transaction_data: dict, failure_reason: str):
+        """Envía ticket de transacción fallida al conductor"""
+        try:
+            ticket_message = {
+                'type': 'TRANSACTION_TICKET',
+                'ticket_id': transaction_data['transaction_id'],
+                'driver_id': cp.driver_id,
+                'cp_id': cp.cp_id,
+                'location': cp.location,
+                'energy_consumed_kwh': round(transaction_data['energy_consumed'], 2),
+                'total_amount_eur': round(transaction_data['amount'], 2),
+                'price_per_kwh': cp.price_per_kwh,
+                'start_time': transaction_data['start_time'],
+                'end_time': transaction_data['end_time'],
+                'duration_minutes': self.calculate_duration_minutes(
+                    transaction_data['start_time'], 
+                    transaction_data['end_time']
+                ),
+                'status': 'FAILED',
+                'failure_reason': failure_reason,
+                'timestamp': datetime.now().isoformat()
+            }
+            
+            self.kafka_manager.send_message('driver_tickets', ticket_message)
+            logger.info(f"🎫 Ticket FALLIDO enviado a driver {cp.driver_id}")
+            
+        except Exception as e:
+            logger.error(f"❌ Error enviando ticket fallido a driver: {e}")
     
     def send_control_command(self, cp_id: str, command: str):
-        """Envía comandos de control a CPs via Kafka"""
+        """Envía comandos de control a CPs via Kafka - MEJORADO"""
         cp = self.database.get_charging_point(cp_id)
         if cp:
-            # ENVIAR COMANDO DIRECTO VIA KAFKA
+            logger.info(f"🔄 Enviando comando {command} a CP {cp_id} via Kafka")
+            
             control_message = {
                 'cp_id': cp_id,
                 'command': command,
@@ -671,119 +1134,262 @@ class EVCentral:
             }
             
             self.kafka_manager.send_message('control_commands', control_message)
-            logger.info(f"Comando {command} enviado a CP {cp_id} via Kafka")
+            logger.debug(f"📤 Mensaje Kafka enviado a control_commands: {control_message}")
             
-            # Actualizar estado local inmediatamente
+            # CORRECCIÓN: Solo actualizar estado local para comandos manuales
+            # Los comandos automáticos desde el Engine ya manejan su estado
             if command == "STOP":
-                self.update_cp_status(cp_id, "PARADO")
-                print(f"Punto de carga {cp_id} parado")
+                if cp.status == "SUMINISTRANDO":
+                    self.update_cp_status(cp_id, "PARADO")
+                    logger.info(f"⏹️ CP {cp_id} puesto en estado PARADO")
+                print(f"✅ Comando STOP enviado a punto de carga {cp_id}")
+            elif command == "START":
+                if cp.status == "ACTIVADO":
+                    self.update_cp_status(cp_id, "SUMINISTRANDO")
+                    logger.info(f"▶️ CP {cp_id} puesto en estado SUMINISTRANDO")
+                print(f"✅ Comando START enviado a punto de carga {cp_id}")
             elif command == "RESUME":
                 self.update_cp_status(cp_id, "ACTIVADO") 
-                print(f"Punto de carga {cp_id} reanudado")
+                logger.info(f"▶️ CP {cp_id} puesto en estado ACTIVADO")
+                print(f"✅ Punto de carga {cp_id} reanudado")
                 
         else:
-            print(f"Punto de carga {cp_id} no encontrado")
+            logger.error(f"❌ CP {cp_id} no encontrado para enviar comando")
+            print(f"❌ Punto de carga {cp_id} no encontrado")
             
     def start_kafka_consumer(self):
         """Inicia el consumidor de Kafka en un hilo separado"""
-        kafka_thread = threading.Thread(
-            target=self.kafka_consumer_loop,
-            daemon=True
-        )
-        kafka_thread.start()
-        logger.info("Consumidor de Kafka iniciado")
+        try:
+            logger.info("🔄 Iniciando hilo del consumidor Kafka...")
+            kafka_thread = threading.Thread(
+                target=self.kafka_consumer_loop,
+                daemon=True,
+                name="KafkaConsumerThread"
+            )
+            kafka_thread.start()
+            logger.info(f"✅ Consumidor de Kafka iniciado")
+            
+        except Exception as e:
+            logger.error(f"❌ Error iniciando consumidor Kafka: {e}", exc_info=True)
     
     def kafka_consumer_loop(self):
-        """Loop principal para consumir mensajes de Kafka"""
+        """Loop principal para consumir mensajes de Kafka - CORREGIDO"""
+        logger.info("🚀 Kafka consumer loop iniciado correctamente")
+        
+        loop_count = 0
         while self.running:
             try:
-                # Consumir mensajes del topic de registros de CPs
-                messages = self.kafka_manager.get_messages('cp_registrations')
-                for msg_data in messages:
-                    message = msg_data['message']
-                    self.process_kafka_registration(message)
+                loop_count += 1
+                logger.info(f"🔄 DENTRO DEL WHILE - Ciclo #{loop_count}")
                 
-                # Consumir mensajes del topic de estado de CPs
-                status_messages = self.kafka_manager.get_messages('cp_status_updates')
-                for msg_data in status_messages:
-                    message = msg_data['message']
-                    self.process_kafka_status_update(message)
+                # ================================================================
+                # 🎯 MODIFICADO: Agregar nuevos topics para tickets
+                # ================================================================
+                topics_to_check = ['driver_requests', 'supply_flow', 'supply_response', 'control_commands', 'driver_tickets', 'engine_tickets']
                 
-                # Consumir peticiones de conductores
-                driver_messages = self.kafka_manager.get_messages('driver_requests')
-                for msg_data in driver_messages:
-                    message = msg_data['message']
-                    self.process_driver_request(message)
+                for topic in topics_to_check:
+                    try:
+                        logger.info(f"🔍 Verificando topic: {topic}")
+                        messages = self.kafka_manager.get_messages(topic)
+                        logger.info(f"📦 Resultado para {topic}: {len(messages)} mensajes")
+                        
+                        if messages:
+                            logger.info(f"🎯 MENSAJES ENCONTRADOS en {topic}: {len(messages)}")
+                            for i, msg_data in enumerate(messages):
+                                message_content = msg_data['message']
+                                logger.info(f"   📝 Mensaje {i+1} (TIPO: {type(message_content)}): {message_content}")
+                                
+                                try:
+                                    if topic == 'supply_response':
+                                        self.process_supply_response(message_content)
+                                    elif topic == 'supply_flow':
+                                        self.process_supply_flow(message_content)
+                                    elif topic == 'driver_requests':
+                                        self.process_driver_request(message_content)
+                                    # Los topics driver_tickets y engine_tickets son para enviar, no recibir
+                                except Exception as e:
+                                    logger.error(f"❌ Error procesando mensaje en {topic}: {e}")
+                        
+                        else:
+                            logger.debug(f"📭 No hay mensajes en {topic}")
+                            
+                    except Exception as e:
+                        logger.error(f"❌ Error en topic {topic}: {e}", exc_info=True)
                 
-                # Consumir mensajes de caudal del Engine
-                flow_messages = self.kafka_manager.get_messages('supply_flow')
-                for msg_data in flow_messages:
-                    message = msg_data['message']
-                    self.process_supply_flow(message)
-                
-                # CONSUMIR RESPUESTAS DE LOS CPs
-                response_messages = self.kafka_manager.get_messages('central_responses')
-                for msg_data in response_messages:
-                    message = msg_data['message']
-                    self.process_central_response(message)
-                
-                time.sleep(2)  # Esperar 2 segundos entre ciclos
+                logger.info(f"💤 Esperando 2 segundos...")
+                time.sleep(2)
+                logger.info(f"✅ Ciclo #{loop_count} completado")
                 
             except Exception as e:
-                logger.error(f"Error en consumidor Kafka: {e}")
+                logger.error(f"💥 ERROR CRÍTICO en kafka_consumer_loop: {e}", exc_info=True)
+                logger.info("💤 Esperando 5 segundos antes de reintentar...")
                 time.sleep(5)
-    
-    def process_central_response(self, message: dict):
-        """Procesa respuestas de los CPs a comandos"""
+        
+        logger.info("🛑 Kafka consumer loop detenido")
+
+    # ================================================================
+    # 🎯 MODIFICADO: Procesar supply_response con manejo de STOP_SUPPLY y tickets
+    # ================================================================
+    def process_supply_response(self, message):
+        """Procesa respuestas de suministro desde el Engine - CON TICKETS"""
+        logger.info(f"🎯 process_supply_response llamado con: {message} (TIPO: {type(message)})")
         try:
+            # Manejar tanto diccionarios como strings
+            if isinstance(message, str):
+                try:
+                    message = json.loads(message)
+                    logger.info(f"🔄 Mensaje parseado de string a dict: {message}")
+                except json.JSONDecodeError as e:
+                    logger.error(f"❌ Error parseando mensaje string a JSON: {e}")
+                    return
+            elif not isinstance(message, dict):
+                logger.error(f"❌ Mensaje no es ni string ni diccionario: {type(message)} - {message}")
+                return
+
+            # Ahora message debería ser un diccionario
             cp_id = message.get('cp_id')
-            command = message.get('command')
-            status = message.get('status')
-            
-            if status == 'EXECUTED':
-                logger.info(f"CP {cp_id} confirmó ejecución de comando: {command}")
+            message_type = message.get('type')
+            reason = message.get('reason', 'No especificado')
+
+            if not cp_id:
+                logger.error("❌ Mensaje de suministro sin CP_ID")
+                return
+
+            cp = self.database.get_charging_point(cp_id)
+            if not cp:
+                logger.error(f"❌ CP {cp_id} no encontrado para mensaje de suministro")
+                return
+
+            # CORRECCIÓN: Manejar los tipos de mensaje del Engine
+            if message_type == 'SUPPLY_REQUEST':
+                # El Engine solicita iniciar suministro
+                if cp.status == "ACTIVADO" or cp.status == "SUMINISTRANDO":
+                    # Autorizar suministro
+                    driver_id = message.get('driver_id', 'MANUAL_ENGINE')
+                    
+                    # Enviar comando START al Engine
+                    control_message = {
+                        'cp_id': cp_id,
+                        'command': 'START',
+                        'driver_id': driver_id,
+                        'timestamp': datetime.now().isoformat(),
+                        'source': 'central'
+                    }
+                    self.kafka_manager.send_message('control_commands', control_message)
+                    logger.info(f"✅ Suministro AUTORIZADO para CP {cp_id} - Comando START enviado")
+                    
+                    # Actualizar estado local
+                    self.update_cp_status(
+                        cp_id=cp_id,
+                        status="SUMINISTRANDO",
+                        driver_id=driver_id
+                    )
+                else:
+                    logger.warning(f"❌ CP {cp_id} no está ACTIVADO o SUMINISTRANDO - Estado actual: {cp.status}")
+                    
+            elif message_type == 'STOP_SUPPLY':
+                # ================================================================
+                # 🎯 NUEVO: El Engine solicita parar suministro - GENERAR TICKETS
+                # ================================================================
+                if cp.status == "SUMINISTRANDO":
+                    # 1. Registrar transacción completada
+                    transaction_data = self.record_transaction(cp, "COMPLETED")
+                    
+                    # 2. Enviar ticket al Driver
+                    self.send_ticket_to_driver(cp, transaction_data)
+                    
+                    # 3. Enviar ticket al Engine
+                    self.send_ticket_to_engine(cp, transaction_data)
+                    
+                    # 4. Enviar comando STOP al Engine (confirmación)
+                    control_message = {
+                        'cp_id': cp_id,
+                        'command': 'STOP',
+                        'timestamp': datetime.now().isoformat(),
+                        'source': 'central',
+                        'transaction_id': transaction_data['transaction_id']
+                    }
+                    self.kafka_manager.send_message('control_commands', control_message)
+                    logger.info(f"🛑 Suministro DETENIDO para CP {cp_id} - Ticket enviado")
+                    
+                    # 5. Actualizar estado local
+                    self.update_cp_status(cp_id, "ACTIVADO")
+                else:
+                    logger.info(f"ℹ️ CP {cp_id} ya estaba detenido - Estado: {cp.status}")
+                    
+            else:
+                logger.warning(f"⚠️ Tipo de mensaje no reconocido: {message_type}")
                 
         except Exception as e:
-            logger.error(f"Error procesando respuesta de CP: {e}")
-
-    def process_supply_flow(self, message: dict):
-        """Procesa mensajes de caudal de suministro desde el Engine"""
+            logger.error(f"❌ Error procesando respuesta de suministro: {e}", exc_info=True)
+        
+    def process_supply_flow(self, message):
+        """Procesa mensajes de caudal de suministro desde el Engine - CORREGIDO"""
+        logger.info(f"🎯 process_supply_flow llamado con: {message} (TIPO: {type(message)})")
         try:
+            # Manejar tanto diccionarios como strings
+            if isinstance(message, str):
+                try:
+                    message = json.loads(message)
+                    logger.info(f"🔄 Mensaje parseado de string a dict: {message}")
+                except json.JSONDecodeError as e:
+                    logger.error(f"❌ Error parseando mensaje string a JSON: {e}")
+                    return
+            elif not isinstance(message, dict):
+                logger.error(f"❌ Mensaje no es ni string ni diccionario: {type(message)} - {message}")
+                return
+
             cp_id = message.get('cp_id')
-            driver_id = message.get('driver_id')
-            flow_rate = message.get('flow_rate')  # kW
-            energy_delivered = message.get('energy_delivered')  # kWh
-            current_amount = message.get('current_amount')  # €
-            timestamp = message.get('timestamp')
+            driver_id = message.get('driver_id', 'MANUAL')
+            kwh = message.get('kwh', 0.0)
+            reason = message.get('reason', '')
             
-            if not cp_id or flow_rate is None:
-                logger.error("Parámetros insuficientes en mensaje de caudal")
+            if not cp_id:
+                logger.error("❌ Parámetros insuficientes en mensaje de suministro")
                 return
             
-            # Actualizar el estado del CP en la Central
+            cp = self.database.get_charging_point(cp_id)
+            if not cp:
+                logger.error(f"❌ CP {cp_id} no encontrado")
+                return
+
+            # CORRECCIÓN: Manejar diferentes razones del mensaje
+            if reason == 'SUPPLY_ENDED':
+                # Suministro finalizado
+                if cp.status == "SUMINISTRANDO":
+                    # Registrar transacción completada
+                    if cp.current_amount > 0:
+                        self.record_transaction(cp, "COMPLETED")
+                    
+                    self.update_cp_status(cp_id, "ACTIVADO")
+                    logger.info(f"✅ Suministro FINALIZADO - CP: {cp_id}, Energía total: {kwh:.2f}kWh")
+                return
+
+            # Suministro en progreso
+            # Calcular importe actual basado en el precio del CP
+            current_amount = kwh * cp.price_per_kwh
+            
+            # Calcular caudal (kW) basado en incremento de energía
+            # Asumimos 1 kWh por segundo para simplificar (en realidad sería menos)
+            current_flow_rate = 1.0  # kW
+
+            # Actualizar el estado del CP
             self.update_cp_status(
                 cp_id=cp_id,
                 status="SUMINISTRANDO",
-                consumption=flow_rate,
+                consumption=current_flow_rate,
                 amount=current_amount,
                 driver_id=driver_id
             )
             
-            logger.debug(f"Caudal actualizado - CP: {cp_id}, Flujo: {flow_rate} kW, Importe: €{current_amount:.2f}")
+            # Actualizar estadísticas acumuladas
+            cp.total_energy_supplied = kwh
+            cp.total_revenue = current_amount
             
-            # ENVIAR ACTUALIZACIÓN AL DRIVER
-            if driver_id:
-                self.send_flow_update_to_driver(
-                    driver_id=driver_id,
-                    cp_id=cp_id,
-                    flow_rate=flow_rate,
-                    energy_delivered=energy_delivered,
-                    current_amount=current_amount,
-                    timestamp=timestamp
-                )
-                
+            logger.info(f"⚡ Suministro ACTIVO - CP: {cp_id}, Energía: {kwh:.2f}kWh, Importe: €{current_amount:.2f}")
+            
         except Exception as e:
-            logger.error(f"Error procesando mensaje de caudal: {e}")
+            logger.error(f"❌ Error procesando mensaje de suministro: {e}", exc_info=True)
 
     def send_flow_update_to_driver(self, driver_id: str, cp_id: str, flow_rate: float, 
                                   energy_delivered: float, current_amount: float, timestamp: str = None):
@@ -791,133 +1397,72 @@ class EVCentral:
         try:
             cp = self.database.get_charging_point(cp_id)
             if not cp:
-                logger.error(f"CP {cp_id} no encontrado para enviar actualización a driver {driver_id}")
+                logger.error(f"❌ CP {cp_id} no encontrado para enviar actualización a driver {driver_id}")
                 return
             
             flow_message = {
                 'driver_id': driver_id,
                 'cp_id': cp_id,
                 'type': 'FLOW_UPDATE',
-                'flow_rate': flow_rate,  # kW actuales
-                'energy_delivered': energy_delivered,  # kWh total entregados
-                'current_amount': current_amount,  # € actuales
-                'total_amount': cp.total_revenue,  # € históricos del CP
+                'flow_rate': flow_rate,
+                'energy_delivered': energy_delivered,
+                'current_amount': current_amount,
+                'total_amount': cp.total_revenue,
                 'location': cp.location,
                 'price_per_kwh': cp.price_per_kwh,
                 'timestamp': timestamp or datetime.now().isoformat()
             }
             
             self.kafka_manager.send_message('driver_responses', flow_message)
-            logger.debug(f"Actualización de caudal enviada a driver {driver_id} - Flujo: {flow_rate} kW")
+            logger.debug(f"📤 Actualización de caudal enviada a driver {driver_id} - Flujo: {flow_rate} kW")
             
         except Exception as e:
-            logger.error(f"Error enviando actualización de caudal a driver {driver_id}: {e}")
-    
-    def process_kafka_registration(self, message: dict):
-        """Procesa mensajes de registro de CPs via Kafka"""
-        try:
-            operation = message.get('operation')
-            
-            if operation == 'REGISTER_CP':
-                self.handle_kafka_cp_registration(message)
-            elif operation == 'HEARTBEAT':
-                self.handle_kafka_heartbeat(message)
-            else:
-                logger.warning(f"Operación Kafka desconocida: {operation}")
-                
-        except Exception as e:
-            logger.error(f"Error procesando registro Kafka: {e}")
-    
-    def handle_kafka_cp_registration(self, message: dict):
-        """Maneja registro de CP via Kafka"""
-        cp_id = message.get('cp_id')
-        location = message.get('location')
-        price_per_kwh = message.get('price_per_kwh', 0.45)
-        
-        # Verificar si el CP ya existe
-        existing_cp = self.database.get_charging_point(cp_id)
-        if existing_cp:
-            # Actualizar CP existente
-            existing_cp.location = location
-            existing_cp.price_per_kwh = price_per_kwh
-            existing_cp.last_heartbeat = datetime.now()
-            if existing_cp.status == "DESCONECTADO":
-                self.update_cp_status(cp_id, "ACTIVADO")
-            logger.info(f"CP {cp_id} actualizado via Kafka")
-        else:
-            # Crear nuevo CP
-            cp = ChargingPoint(cp_id, location, price_per_kwh)
-            cp.last_heartbeat = datetime.now()
-            self.database.add_charging_point(cp)
-            self.update_cp_status(cp_id, "ACTIVADO")
-            logger.info(f"CP {cp_id} registrado via Kafka - Ubicación: {location}")
-        
-        # Enviar confirmación
-        self.kafka_manager.send_message('central_responses', {
-            'operation': 'REGISTRATION_CONFIRMED',
-            'cp_id': cp_id,
-            'status': 'SUCCESS',
-            'timestamp': datetime.now().isoformat()
-        })
-    
-    def handle_kafka_heartbeat(self, message: dict):
-        """Maneja heartbeat de CP via Kafka"""
-        cp_id = message.get('cp_id')
-        cp = self.database.get_charging_point(cp_id)
-        if cp:
-            cp.last_heartbeat = datetime.now()
-            logger.debug(f"Heartbeat recibido via Kafka de {cp_id}")
-    
-    def process_kafka_status_update(self, message: dict):
-        """Procesa actualizaciones de estado via Kafka"""
-        try:
-            cp_id = message.get('cp_id')
-            status = message.get('status')
-            consumption = message.get('consumption', 0.0)
-            amount = message.get('amount', 0.0)
-            driver_id = message.get('driver_id')
-            
-            self.update_cp_status(cp_id, status, consumption, amount, driver_id)
-            logger.info(f"Estado actualizado via Kafka - CP: {cp_id}, Estado: {status}")
-            
-        except Exception as e:
-            logger.error(f"Error procesando actualización de estado Kafka: {e}")
+            logger.error(f"❌ Error enviando actualización de caudal a driver {driver_id}: {e}", exc_info=True)
 
-    def process_driver_request(self, message: dict):
-        """Procesa peticiones de suministro desde app de conductor via Kafka"""
+    def process_driver_request(self, message):
+        """Procesa peticiones de suministro desde app de conductor via Kafka - CORREGIDO"""
+        logger.info(f"🎯 process_driver_request llamado con: {message} (TIPO: {type(message)})")
         try:
+            # CORRECCIÓN: Manejar tanto diccionarios como strings
+            if isinstance(message, str):
+                try:
+                    message = json.loads(message)
+                    logger.info(f"🔄 Mensaje parseado de string a dict: {message}")
+                except json.JSONDecodeError as e:
+                    logger.error(f"❌ Error parseando mensaje string a JSON: {e}")
+                    return
+            elif not isinstance(message, dict):
+                logger.error(f"❌ Mensaje no es ni string ni diccionario: {type(message)} - {message}")
+                return
+
             driver_id = message.get('driver_id')
             cp_id = message.get('cp_id')
             request_type = message.get('type', 'SUPPLY_REQUEST')
             
             if not driver_id or not cp_id:
-                logger.error("Parámetros insuficientes en petición de conductor")
+                logger.error("❌ Parámetros insuficientes en petición de conductor")
                 return
             
-            logger.info(f"Petición de conductor recibida - Driver: {driver_id}, CP: {cp_id}")
+            logger.info(f"📨 Petición de conductor recibida - Driver: {driver_id}, CP: {cp_id}")
             
             if request_type == 'SUPPLY_REQUEST':
                 self.handle_driver_supply_request(driver_id, cp_id)
             elif request_type == 'STATUS_QUERY':
                 self.handle_driver_status_query(driver_id, cp_id)
             else:
-                logger.warning(f"Tipo de petición desconocido: {request_type}")
+                logger.warning(f"⚠️ Tipo de petición desconocido: {request_type}")
                 
         except Exception as e:
-            logger.error(f"Error procesando petición de conductor: {e}")
+            logger.error(f"❌ Error procesando petición de conductor: {e}", exc_info=True)
     
     def handle_driver_supply_request(self, driver_id: str, cp_id: str):
         """Maneja solicitud de suministro desde conductor"""
-        # Registrar conductor si no existe
         if driver_id not in self.database.drivers:
             self.database.register_driver(driver_id)
         
-        # Verificar disponibilidad del CP
         cp = self.database.get_charging_point(cp_id)
         if cp and cp.status == "ACTIVADO":
-            # ENVIAR AUTORIZACIÓN AL CP VIA SOCKET
             if self.authorize_cp_supply(cp_id, driver_id):
-                # Notificar éxito al conductor
                 self.kafka_manager.send_message('driver_responses', {
                     'driver_id': driver_id,
                     'cp_id': cp_id,
@@ -927,9 +1472,8 @@ class EVCentral:
                     'price_per_kwh': cp.price_per_kwh,
                     'timestamp': datetime.now().isoformat()
                 })
-                logger.info(f"Suministro autorizado - Driver: {driver_id}, CP: {cp_id}")
+                logger.info(f"✅ Suministro autorizado - Driver: {driver_id}, CP: {cp_id}")
             else:
-                # Error al comunicar con CP
                 self.kafka_manager.send_message('driver_responses', {
                     'driver_id': driver_id,
                     'cp_id': cp_id,
@@ -938,7 +1482,6 @@ class EVCentral:
                     'timestamp': datetime.now().isoformat()
                 })
         else:
-            # CP no disponible
             cp_status = cp.status if cp else "NO_ENCONTRADO"
             self.kafka_manager.send_message('driver_responses', {
                 'driver_id': driver_id,
@@ -947,12 +1490,11 @@ class EVCentral:
                 'message': f'Punto de carga no disponible - Estado: {cp_status}',
                 'timestamp': datetime.now().isoformat()
             })
-            logger.warning(f"Suministro denegado - Driver: {driver_id}, CP: {cp_id} - Estado: {cp_status}")
+            logger.warning(f"❌ Suministro denegado - Driver: {driver_id}, CP: {cp_id} - Estado: {cp_status}")
     
     def handle_driver_status_query(self, driver_id: str, cp_id: str = None):
         """Maneja consulta de estado desde conductor"""
         if cp_id:
-            # Consulta de CP específico
             cp = self.database.get_charging_point(cp_id)
             if cp:
                 self.kafka_manager.send_message('driver_responses', {
@@ -977,7 +1519,6 @@ class EVCentral:
                     'timestamp': datetime.now().isoformat()
                 })
         else:
-            # Consulta de todos los CPs
             all_cps = self.database.get_all_cps()
             self.kafka_manager.send_message('driver_responses', {
                 'driver_id': driver_id,
@@ -987,32 +1528,45 @@ class EVCentral:
             })
     
     def authorize_cp_supply(self, cp_id: str, driver_id: str) -> bool:
-        """Autoriza suministro en el CP via socket"""
+        """Autoriza suministro en el CP via socket Y Kafka"""
         try:
-            cp = self.database.get_charging_point(cp_id)
-            if not cp or not cp.socket_connection:
-                logger.error(f"No hay conexión socket con CP {cp_id}")
-                return False
+            # Enviar comando START por Kafka
+            control_message = {
+                'cp_id': cp_id,
+                'command': 'START',  # Comando para iniciar suministro
+                'driver_id': driver_id,
+                'timestamp': datetime.now().isoformat(),
+                'source': 'central'
+            }
+            self.kafka_manager.send_message('control_commands', control_message)
+            logger.info(f"📤 Comando START enviado a CP {cp_id} via Kafka")
             
-            # ENVIAR COMANDO DE AUTORIZACIÓN AL CP VIA SOCKET
-            auth_message = f"SUMINISTRO_AUTORIZADO#{driver_id}"
-            cp.socket_connection.send(auth_message.encode('utf-8'))
+            # También enviar por socket (backup)
+            cp = self.database.get_charging_point(cp_id)
+            if cp and cp.socket_connection:
+                try:
+                    auth_message = f"SUMINISTRO_AUTORIZADO#{driver_id}"
+                    cp.socket_connection.send(auth_message.encode('utf-8'))
+                    logger.info(f"📤 Comando enviado a CP {cp_id} via socket")
+                except:
+                    logger.warning(f"⚠️ No se pudo enviar comando via socket a CP {cp_id}")
             
             self.update_cp_status(cp_id, "SUMINISTRANDO", driver_id=driver_id)
-            logger.info(f"CP {cp_id} confirmó autorización para driver {driver_id}")
+            logger.info(f"✅ Suministro autorizado para CP {cp_id} - Conductor: {driver_id}")
             return True
-        except Exception as e:
-            logger.error(f"Error autorizando suministro en CP {cp_id}: {e}")
-            return False
             
+        except Exception as e:
+            logger.error(f"❌ Error autorizando suministro en CP {cp_id}: {e}", exc_info=True)
+            return False
+
 def main():
     """Función principal"""
     
-    # Configuración
-    socket_host = '0.0.0.0'
-    socket_port = 9090
-    kafka_servers = 'localhost:9092'
-    data_file = "ev_central_data.json"
+    # Configuración con variables de entorno
+    socket_host = os.getenv('SOCKET_HOST', '0.0.0.0')
+    socket_port = int(os.getenv('SOCKET_PORT', '5000'))
+    kafka_servers = os.getenv('KAFKA_SERVERS', 'localhost:9092')
+    data_file = os.getenv('DATA_FILE', None)
     
     # Usar parámetros de línea de comandos si se proporcionan
     if len(sys.argv) > 1:
@@ -1028,17 +1582,17 @@ def main():
     print("CON PERSISTENCIA DE DATOS - VERSIÓN COMPLETA")
     print("=" * 60)
     print(f"Socket: {socket_host}:{socket_port}")
-    print(f"Kafka: {kafka_servers} (simulado)")
-    print(f"Archivo de datos: {data_file}")
+    print(f"Kafka: {kafka_servers} (REAL)")
+    print(f"Archivo de datos: {data_file or 'valor por defecto'}")
+    print(f"Directorio de logs: {os.getenv('LOG_DIR', '/app/logs')}")
     print("=" * 60)
     
     try:
-        # Crear e iniciar el sistema central
         central = EVCentral(socket_host, socket_port, kafka_servers, data_file)
         central.start()
         
     except Exception as e:
-        logger.error(f"Error iniciando EV_Central: {e}")
+        logger.error(f"❌ Error iniciando EV_Central: {e}", exc_info=True)
         sys.exit(1)
 
 if __name__ == "__main__":
