@@ -9,18 +9,79 @@ import json
 import os
 from datetime import datetime
 from kafka import KafkaConsumer, KafkaProducer
+if os.name != 'nt':
+    import select
+    import tty
+    import termios
+else:
+    import msvcrt
 
 class MENSAJES_CP_M(enum.Enum):
     STATUS_E = "STATUS_E"
     STATUS_OK = "STATUS_OK"
     STATUS_KO = "STATUS_KO"
-    SOL_SUMINISTRO = 'SUPPLY_APPROVED'
-    SUMINISTRAR = "supply_response"
-    SUMINISTRANDO = "supply_flow"
-    SOL_PARAR = 'STOP'
-    PARAR = "stop"
+    #SOL_SUMINISTRO = 'SUPPLY_APPROVED'
+    TICKET_RECIBIDO = 'CHARGING_TICKET'
+    SOL_SUMINISTRO = 'SUPPLY_REQUEST'
+    SUMINISTRAR = "START"
+    SUMINISTRANDO = "SUPPLY_FLOW"
+    #SOL_PARAR = 'STOP'
+    SOL_PARAR = 'STOP_SUPPLY'
+    PARAR = "STOP"
     ERROR_COMM = "ERROR_COMM"
     ERROR_KAFKA = "ERROR_KAFKA"
+
+class Ticket: #CONFIGURAR SEGUN NECESIDADES
+    
+    def __init__(self, cp_id, type, ticket_id, energy_consumed, amount, price_per_kwh, start_time, end_time, timestamp, tiempo_pantalla):
+        self.cp_id = cp_id
+        self.type = type
+        self.ticket_id = ticket_id
+        self.energy_consumed = energy_consumed
+        self.amount = amount
+        self.price_per_kwh = price_per_kwh
+        self.start_time = start_time
+        self.end_time = end_time
+        self.timestamp = timestamp
+        self.tiempo_pantalla = tiempo_pantalla
+    
+    def mostrar_ticket(self):
+        # Usamos colores (si la terminal lo soporta) o asteriscos para resaltar
+        SEPARADOR_FIN = "=" * 80
+        SEPARADOR_MEDIO = "-" * 80
+        
+        # --- Título ---
+        print(f"\n{SEPARADOR_FIN}")
+        print(f"| {'***** TICKET DE CARGA FINALIZADA *****':^78} |")
+        print(f"| {self.type.upper():^78} |")
+        print(f"{SEPARADOR_FIN}")
+        
+        # --- Detalles de la Sesión ---
+        print(f"| {'Punto de Carga ID: ':<30} {self.cp_id:^47} |")
+        print(f"| {'Ticket ID: ':<30} {self.ticket_id:^47} |")
+        print(SEPARADOR_MEDIO)
+        
+        # --- Consumo y Costo ---
+        # Usamos f-strings para formatear los números a dos decimales y alinearlos.
+        energia_str = f"{self.energy_consumed:,.2f} kWh"
+        importe_str = f"{self.amount:,.2f} €"
+        precio_str = f"{self.price_per_kwh:,.3f} €/kWh"
+        
+        print(f"| {'ENERGÍA CONSUMIDA: ':<30} {energia_str:>47} |")
+        print(f"| {'IMPORTE TOTAL: ':<30} {importe_str:>47} |")
+        print(f"| {'Precio por kWh: ':<30} {precio_str:>47} |")
+        print(SEPARADOR_MEDIO)
+        
+        # --- Tiempos ---
+        print(f"| {'Inicio de Carga: ':<30} {self.start_time:^47} |")
+        print(f"| {'Fin de Carga: ':<30} {self.end_time:^47} |")
+        print(f"| {'Timestamp de Emisión: ':<30} {self.timestamp:^47} |")
+        
+        # --- Final ---
+        print(f"{SEPARADOR_FIN}\n")
+        
+        # Reducir el contador para que se oculte después de unos segundos
+        self.tiempo_pantalla -= 1
 
 class EV_CP_E:
 
@@ -28,6 +89,7 @@ class EV_CP_E:
     TOPICO_ACCION = "supply_flow"
     TOPICO_SUMINISTRO = "supply_response"
     TOPICO_CONTROL = "control_commands"
+    TOPICO_TICKETS = "engine_tickets"
     TIMEOUT = 2
 
     def __init__(self, IP_PUERTO_BROKER, PUERTO):
@@ -40,10 +102,12 @@ class EV_CP_E:
         self.estado = MENSAJES_CP_M.STATUS_KO.value
         self.producer = None
         self.consumer = None
+        self.consumer_tickets = None  # Consumidor para tickets
         self.suministrar_actvio = False
         self.parar_suministro = threading.Event()
         self.espera_respuesta_menu = threading.Event()
         self.total_kwh_suministrados = 0.0
+        self.ticket_actual = None
         print(f"Engine inicializado con IP_BROKER: {self.IP_BROKER}, PUERTO_BROKER: {self.PUERTO_BROKER}")
 
     def abrir_socket(self):
@@ -77,23 +141,21 @@ class EV_CP_E:
                 bootstrap_servers=[f"{self.IP_BROKER}:{self.PUERTO_BROKER}"], 
                 value_serializer=lambda v: json.dumps(v).encode('utf-8')
             )
-            
-            
             self.consumer = KafkaConsumer(
-                EV_CP_E.TOPICO_CONTROL, 
-                'engine_tickets',  # Escuchar tickets también
+                EV_CP_E.TOPICO_CONTROL,
+                EV_CP_E.TOPICO_TICKETS, 
                 bootstrap_servers=[f"{self.IP_BROKER}:{self.PUERTO_BROKER}"], 
-                auto_offset_reset='earliest',
+                auto_offset_reset='latest', 
                 enable_auto_commit=True, 
-                group_id='all_engines_group',
+                #group_id=f'engine_{self.ID}_group', 
                 value_deserializer=lambda x: json.loads(x.decode('utf-8')) if x else None
             )
             
-            print("✅ Conexión Kafka abierta - Escuchando commands y tickets")
+            print("Conexión Kafka abierta correctamente.")
             return True
         
         except Exception as e:
-            print(f"❌ Error al abrir la conexión Kafka: {e}")
+            print(f"Error al abrir la conexión Kafka: {e}")
             if (hasattr(self, 'producer') and self.producer) or (hasattr(self, 'consumer') and self.consumer): 
                 self.producer.close()
                 self.consumer.close()
@@ -131,66 +193,67 @@ class EV_CP_E:
                     conexion_monitor.close()
 
     def escuchar_central(self):
-        """Escucha comandos de la Central Y tickets - VERSIÓN MEJORADA"""
+        """Escucha comandos de la Central - CORREGIDO"""
         if self.consumer is None:
             print("Consumidor Kafka no está inicializado.")
             return
 
-        print(f"🔍 Escuchando mensajes de la central...")
+        print(f"🔍 Escuchando mensajes de la central en topic: {EV_CP_E.TOPICO_CONTROL}")
         
         try:
             for mensaje in self.consumer:
                 try:
                     mensaje_valor = mensaje.value
-                    print(f"📨 Mensaje recibido: {mensaje_valor}")
+                    print(f"📨 Mensaje recibido de la central: {mensaje_valor}")
                     
-                    # Parsear si es necesario
                     if isinstance(mensaje_valor, str):
                         try:
                             mensaje_valor = json.loads(mensaje_valor)
                         except json.JSONDecodeError:
-                            continue
-                    
-                    # Verificar que es un diccionario
-                    if not isinstance(mensaje_valor, dict):
-                        continue
-                    
-                    # FILTRADO por cp_id
+                            print("❌ Error: Mensaje no es JSON válido y se descartará.")
+                            continue # Pasar al siguiente mensaje
+                        
                     cp_id = mensaje_valor.get('cp_id')
+
                     if not cp_id or str(cp_id) != str(self.ID):
                         print(f"📭 Mensaje para CP {cp_id}, este es CP {self.ID} - IGNORADO")
                         continue
-                    
-                    print(f"🎯 MENSAJE PARA ESTE CP {self.ID} - PROCESANDO")
-                    
-                    # Procesar TICKETS
-                    message_type = mensaje_valor.get('type')
-                    if message_type == 'CHARGING_TICKET':
-                        print(f"🎫 TICKET RECIBIDO - Transacción: {mensaje_valor.get('ticket_id')}")
-                        self.mostrar_ticket(mensaje_valor)
-                        continue 
-                    
-                    # Procesar comandos normales (START/STOP)
-                    command = mensaje_valor.get('command')
-                    print(f"⚡ Comando: {command}")
-                    
-                    if command == 'START':
-                        print("🚀 INICIANDO SUMINISTRO...")
-                        if not self.suministrar_actvio:
-                            self.iniciar_suministro()
-                        else:
-                            print("ℹ️ Ya estaba suministrando")
-                            
-                    elif command == 'STOP':
-                        print("🛑 DETENIENDO SUMINISTRO...")
-                        if self.suministrar_actvio:
-                            self.detener_suministro()
-                        else:
-                            print("ℹ️ Ya estaba detenido")
-                            
+
+                    if cp_id == self.ID:
+                        print(f"🎯 Mensaje para este CP {self.ID}")
+
+                        command = mensaje_valor.get('command')
+                        message_type = mensaje_valor.get('type')
+                        
+                        if message_type == MENSAJES_CP_M.TICKET_RECIBIDO.value:
+                            print(f"🎫 TICKET RECIBIDO - Transacción: {mensaje_valor.get('ticket_id')}")
+                            self.ticket_actual = Ticket(
+                                cp_id=mensaje_valor.get('cp_id'),
+                                type=mensaje_valor.get('type'),
+                                ticket_id=mensaje_valor.get('ticket_id'),
+                                energy_consumed=mensaje_valor.get('energy_consumed'),
+                                amount=mensaje_valor.get('amount'),
+                                price_per_kwh=mensaje_valor.get('price_per_kwh'),
+                                start_time=mensaje_valor.get('start_time'),
+                                end_time=mensaje_valor.get('end_time'),
+                                timestamp=mensaje_valor.get('timestamp'),
+                                tiempo_pantalla=30
+                            )
+                            continue
+
+                        if command == MENSAJES_CP_M.SUMINISTRAR.value:
+                            print("🚀 Comando START recibido - Iniciando suministro...")
+                            if not self.suministrar_actvio:
+                                self.iniciar_suministro()
+                                
+                        elif command == MENSAJES_CP_M.PARAR.value:
+                            print("🛑 Comando STOP recibido - Deteniendo suministro...")
+                            if self.suministrar_actvio:
+                                self.detener_suministro()
+                                
                 except Exception as e:
                     print(f"❌ Error procesando mensaje: {e}")
-                        
+                    
         except Exception as e:
             print(f"❌ Error en escuchar_central: {e}")
 
@@ -199,13 +262,13 @@ class EV_CP_E:
         if self.suministrar_actvio:
             ########################################################NOTIFICAR CENTRAL
             return
-            
+        self.ticket_actual = None  # Limpiar ticket actual al iniciar suministro   
         self.suministrar_actvio = True
         self.parar_suministro.clear()
         self.total_kwh_suministrados = 0.0
         ##########################################################NOTIFICAR A LA CENTRAL
         # Iniciar hilo de suministro
-        suministro_thread = threading.Thread(target=self.suministrar_energia, daemon=True)
+        suministro_thread = threading.Thread(target=self.suministrar_energia, daemon=True) ################################################################# DAEMON
         suministro_thread.start()
         print("✅ Hilo de suministro iniciado")
 
@@ -226,14 +289,14 @@ class EV_CP_E:
         
         while not self.parar_suministro.is_set():
             self.total_kwh_suministrados += 0.1
-            ##################################################3 GUARDAR ESTADO
+            self.guardar_estado()
             # Enviar datos de suministro a la Central
             mensaje = {
                 'cp_id': self.ID, 
                 'driver_id': "MANUAL", 
                 'kwh': round(self.total_kwh_suministrados, 1),
                 'timestamp': datetime.now().isoformat(),
-                'reason': 'SUPPLY_FLOW' ##### MENSAJE
+                'reason': MENSAJES_CP_M.SUMINISTRANDO.value ##### MENSAJE
             }
             self.producer.send(EV_CP_E.TOPICO_ACCION, json.dumps(mensaje))
             self.producer.flush()
@@ -250,14 +313,15 @@ class EV_CP_E:
             'kwh': round(self.total_kwh_suministrados, 1), 
             'reason': 'SUPPLY_ENDED'
         }
+
         self.producer.send(EV_CP_E.TOPICO_ACCION, json.dumps(mensaje_final))
         self.producer.flush()
-        
+
         # Resetear contadores
         self.total_kwh_suministrados = 0.0
 
     def mostrar_menu(self):
-        self.espera_respuesta_menu.set()
+        #self.espera_respuesta_menu.set()
         while True:
 
             os.system('cls' if os.name == 'nt' else 'clear')
@@ -281,16 +345,27 @@ class EV_CP_E:
                     print("⚠️  Suministro de energía ACTIVO ⚠️ ")
                     print(f"Total kWh suministrados hasta ahora: {self.total_kwh_suministrados:.2f} kWh")
                     print("-----------------------------------")
-                print("Seleccione una opción: ")
-                response_menu_thread = threading.Thread(target=self.responder_menu, daemon=True)
-                response_menu_thread.start()
+                if self.ticket_actual and self.ticket_actual.tiempo_pantalla > 0:
+                    self.ticket_actual.mostrar_ticket()
+                print("Seleccione una opción: ", end='')
+                #response_menu_thread = threading.Thread(target=self.responder_menu, daemon=True)
+                #response_menu_thread.start()
 
+            respuesta = None
+            if os.name == 'nt': # Solo intentar usar msvcrt en Windows
+                if msvcrt.kbhit():
+                    respuesta = msvcrt.getch().decode()
+            else:
+                if select.select([sys.stdin], [], [], 0) == ([sys.stdin], [], []):
+                    # Si hay datos, leemos la línea completa.
+                    respuesta = sys.stdin.readline().strip()
+            self.responder_menu(respuesta)
             time.sleep(1)
 
             
-    def responder_menu(self):
-        self.espera_respuesta_menu.clear()
-        switch = input().strip()
+    def responder_menu(self, switch):
+        #self.espera_respuesta_menu.clear()
+        #switch = input().strip()
 
         if switch == "1":
             estado = ""
@@ -316,8 +391,8 @@ class EV_CP_E:
                 # SOLICITAR INICIO de suministro a la Central
                 print("🚀 Solicitando inicio de suministro a la central...")
                 mensaje_inicio = {
-                    'cp_id': self.ID,  # CORRECCIÓN: Incluir siempre el cp_id
-                    'type': 'SUPPLY_REQUEST',
+                    'cp_id': self.ID,
+                    'type': MENSAJES_CP_M.SOL_SUMINISTRO.value,
                     'driver_id': 'MANUAL_ENGINE',
                     'timestamp': datetime.now().isoformat(),
                     'reason': 'MANUAL_START'
@@ -327,11 +402,11 @@ class EV_CP_E:
                 print("✅ Solicitud de inicio enviada a la central")
                 
             elif self.estado == MENSAJES_CP_M.STATUS_OK.value and self.suministrar_actvio:
-                # DETENER suministro
+                # DETENER suministro - ENVIAR MENSAJE DE STOP CORRECTO
                 print("🛑 Enviando solicitud de PARADA a la central...")
                 mensaje_stop = {
-                    'cp_id': self.ID,  # CORRECCIÓN: Incluir siempre el cp_id
-                    'type': 'STOP_SUPPLY',
+                    'cp_id': self.ID,
+                    'type': MENSAJES_CP_M.SOL_PARAR.value,
                     'reason': 'MANUAL_STOP_ENGINE',
                     'timestamp': datetime.now().isoformat()
                 }
@@ -346,20 +421,12 @@ class EV_CP_E:
                 print("IMPOSIBLE_SUMINISTRAR: El punto de carga se encuentra averiado")
 
         elif switch == "4":
-            if self.total_kwh_suministrados != 0.0:
-                self.guardar_estado()
-            if self.producer:
-                self.producer.close()
-            if self.consumer:
-                self.consumer.close()
-            if self.socket_monitor:
-                self.socket_monitor.close()
-            print("CERRADA DE SISTEMA")
-            os._exit(0)
+            self.limpiar_y_salir()
+
         elif switch:
             print("Comando desconocido")
         
-        self.espera_respuesta_menu.set()
+        #self.espera_respuesta_menu.set()
 
     def run(self):
         print("Engine corriendo...")
@@ -372,7 +439,12 @@ class EV_CP_E:
             listener_thread_c = threading.Thread(target=self.escuchar_central, daemon=True)
             listener_thread_c.start()
 
-            self.mostrar_menu()
+            menu_thread = threading.Thread(target=self.mostrar_menu, daemon=True)
+            menu_thread.start()
+
+            #self.mostrar_menu()
+            while True:
+                time.sleep(1)
 
     def guardar_estado(self):
         estado_info = {
@@ -399,51 +471,29 @@ class EV_CP_E:
                 print(f"[ERROR RESILIENCIA] Error al cargar el estado: {e}. Iniciando desde 0.")
                 self.total_kwh_suministrados = 0.0
 
-    def mostrar_ticket(self, ticket_data: dict):
-        """Muestra el ticket de carga de forma visual y clara"""
-        print("\n" + "="*60)
-        print("🎫 TICKET DE CARGA - RESUMEN DE TRANSACCIÓN")
-        print("="*60)
-        
-        # Información básica
-        print(f"🔌 Punto de Carga: {ticket_data.get('cp_id', 'N/A')}")
-        print(f"📋 ID Transacción: {ticket_data.get('ticket_id', 'N/A')}")
-        print(f"🕐 Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        print("-"*60)
-        
-        # Detalles de energía y costo
-        energia = ticket_data.get('energy_consumed', 0)
-        precio_kwh = ticket_data.get('price_per_kwh', 0)
-        importe_total = ticket_data.get('amount', 0)
-        
-        print(f"⚡ Energía Consumida: {energia:.2f} kWh")
-        print(f"💰 Precio por kWh: €{precio_kwh:.3f}")
-        print(f"💵 Importe Total: €{importe_total:.2f}")
-        print("-"*60)
-        
-        # Tiempos de carga
-        start_time = ticket_data.get('start_time', '')
-        end_time = ticket_data.get('end_time', '')
-        
-        if start_time and end_time:
-            try:
-                # Formatear tiempos para mejor legibilidad
-                start_dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
-                end_dt = datetime.fromisoformat(end_time.replace('Z', '+00:00'))
-                duracion = end_dt - start_dt
-                
-                print(f"⏱️  Duración de carga: {duracion.total_seconds() / 60:.1f} minutos")
-                print(f"🟢 Inicio: {start_dt.strftime('%H:%M:%S')}")
-                print(f"🔴 Fin: {end_dt.strftime('%H:%M:%S')}")
-            except Exception as e:
-                print(f"⏱️  Inicio: {start_time}")
-                print(f"🔴 Fin: {end_time}")
-        
-        # Resumen final
-        print("-"*60)
-        print("✅ CARGA COMPLETADA EXITOSAMENTE")
-        print("="*60)
-        print("\n")
+    def limpiar_y_salir(self):
+        print("\n[Engine Shutdown] Iniciando limpieza de recursos...")
+        if self.ID and self.total_kwh_suministrados != 0.0:
+            self.guardar_estado()
+            time.sleep(1)
+        if self.suministrar_actvio:
+            self.parar_suministro.set() 
+            time.sleep(1.5)
+        try:
+            if hasattr(self, 'producer') and self.producer:
+                self.producer.close()
+            if hasattr(self, 'consumer') and self.consumer:
+                self.consumer.close()
+            # CRUCIAL: Cerrar el socket detiene el bloqueo en .accept() de escuchar_monitor
+            if hasattr(self, 'socket_monitor') and self.socket_monitor:
+                self.socket_monitor.close() 
+        except Exception as e:
+            print(f"[Engine Shutdown] Error al cerrar recursos: {e}")
+
+        print("[Engine Shutdown] Proceso terminado.")
+        time.sleep(2)
+        #os._exit(0)
+        sys.exit(0)
     
 if __name__ == "__main__":
     if len(sys.argv) < 2 or len(sys.argv) > 3:
@@ -452,17 +502,16 @@ if __name__ == "__main__":
     
     puerto_engine = int(sys.argv[2]) if len(sys.argv) == 3 else EV_CP_E.PUERTO_BASE
     engine = EV_CP_E(sys.argv[1], puerto_engine)
-
+    
     try:
         engine.run()
+
     except KeyboardInterrupt:
-        print("Engine detenido. Ctrl+C detectado. Saliendo...")
-        if engine.total_kwh_suministrados != 0.0:
-            engine.guardar_estado()
-        if engine.producer:
-            engine.producer.close()
-        if engine.consumer:
-            engine.consumer.close()
-        if engine.socket_monitor:
-            engine.socket_monitor.close()
+        engine.limpiar_y_salir()
         os._exit(0)
+
+    except Exception as e:
+        # Este bloque sigue siendo crucial para manejar otros errores inesperados.
+        print(f"[ERROR CRÍTICO] Excepción no controlada: {e}")
+        engine.limpiar_y_salir()
+        
