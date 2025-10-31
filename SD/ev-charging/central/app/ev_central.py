@@ -360,8 +360,6 @@ from kafka import KafkaProducer, KafkaConsumer
 from kafka.errors import KafkaError
 
 class RealKafkaManager:
-    """Gestor de Kafka real para producción"""
-    
     def __init__(self, bootstrap_servers: str):
         self.bootstrap_servers = bootstrap_servers
         self.producer = None
@@ -371,8 +369,12 @@ class RealKafkaManager:
             self.producer = KafkaProducer(
                 bootstrap_servers=[self.bootstrap_servers],
                 value_serializer=lambda v: json.dumps(v).encode('utf-8'),
-                retries=3,
-                acks='all'
+                retries=2,  # ✅ Reducir retries
+                acks=1,     # ✅ No esperar todos los acks (mejor rendimiento)
+                linger_ms=5,  # ✅ Agrupar mensajes por 5ms
+                batch_size=16384,  # ✅ Tamaño de batch
+                buffer_memory=33554432,  # ✅ 32MB buffer
+                max_block_ms=5000  # ✅ Max 5 segundos bloqueo
             )
             
             logger.info(f"🔌 Kafka REAL conectado en {bootstrap_servers}")
@@ -396,77 +398,69 @@ class RealKafkaManager:
         except Exception as e:
             logger.error(f"❌ Error inesperado enviando mensaje: {e}")
     
-    def get_messages(self, topic: str, consumer_group: str = None):
-        """Obtiene mensajes de un topic real de Kafka - CORREGIDO"""
+    def get_messages(self, topic: str, consumer_group: str):
+        """Obtiene mensajes de un topic real de Kafka - VERSIÓN CORREGIDA PARA BROADCAST"""
         try:
-            logger.info(f"🔍 get_messages llamado para topic: {topic}")
+            logger.debug(f"🔍 get_messages llamado para topic: {topic}, group: {consumer_group}")
             
-            if topic not in self.consumers:
-                logger.info(f"🆕 Creando nuevo consumer para: {topic}")
-                group_id = consumer_group or f"central_{topic}_group"
-                self.consumers[topic] = KafkaConsumer(
+            if topic not in self.consumers or consumer_group not in self.consumers[topic]:
+                logger.debug(f"🆕 Creando nuevo consumer para: {topic}, group: {consumer_group}")
+                consumer = KafkaConsumer(
                     topic,
                     bootstrap_servers=[self.bootstrap_servers],
                     auto_offset_reset='earliest',
                     enable_auto_commit=True,
-                    auto_commit_interval_ms=1000,
-                    group_id=group_id,
+                    auto_commit_interval_ms=500,
+                    group_id=consumer_group,  # ✅ grupo único por CP
                     value_deserializer=lambda x: x.decode('utf-8') if x else None,
-                    consumer_timeout_ms=1000
+                    consumer_timeout_ms=100,
+                    max_poll_records=10,
+                    session_timeout_ms=10000,
+                    heartbeat_interval_ms=3000
                 )
-                logger.info(f"✅ Consumer creado para {topic}, group: {group_id}")
+                if topic not in self.consumers:
+                    self.consumers[topic] = {}
+                self.consumers[topic][consumer_group] = consumer
+                logger.debug(f"✅ Consumer creado para {topic}, group: {consumer_group}")
             
-            consumer = self.consumers[topic]
+            consumer = self.consumers[topic][consumer_group]
             messages = []
-            
-            logger.info(f"📥 Polling mensajes de {topic}...")
+
+            logger.debug(f"📥 Polling mensajes de {topic}...")
             try:
-                records = consumer.poll(timeout_ms=2000)
+                records = consumer.poll(timeout_ms=500)
             except Exception as e:
                 if "KafkaConsumer is closed" in str(e):
-                    logger.warning(f"🔄 Consumer cerrado, recreando para {topic}")
-                    del self.consumers[topic]
+                    logger.warning(f"🔄 Consumer cerrado, recreando para {topic}, group: {consumer_group}")
+                    del self.consumers[topic][consumer_group]
                     return self.get_messages(topic, consumer_group)
                 else:
                     raise e
-            
-            logger.info(f"📊 Poll result: {len(records)} partitions con mensajes")
-            
+
             for topic_partition, message_batch in records.items():
-                logger.info(f"   📦 Partition {topic_partition}: {len(message_batch)} mensajes")
                 for message in message_batch:
                     if message.value:
                         try:
-                            # PARSEAR MANUALMENTE el JSON
-                            if isinstance(message.value, str):
-                                message_dict = json.loads(message.value)
-                            else:
-                                message_dict = json.loads(message.value.decode('utf-8'))
-                            
+                            message_dict = json.loads(message.value)
                             messages.append({
                                 'timestamp': datetime.fromtimestamp(message.timestamp / 1000),
                                 'message': message_dict
                             })
-                            logger.info(f"   📨 Mensaje recibido (TIPO: {type(message_dict)}): {message_dict}")
+                            logger.debug(f"   📨 Mensaje recibido: {message_dict}")
                         except json.JSONDecodeError as e:
-                            logger.error(f"❌ Error parseando JSON: {e} - Mensaje: {message.value}")
+                            logger.error(f"❌ Error parseando JSON: {e}")
                         except Exception as e:
-                            logger.error(f"❌ Error procesando mensaje: {e} - Mensaje: {message.value}")
-            
-            if messages:
-                logger.info(f"✅ {len(messages)} mensajes REALES consumidos de {topic}")
-            else:
-                logger.info(f"📭 No hay mensajes en {topic}")
-            
+                            logger.error(f"❌ Error procesando mensaje: {e}")
+
             return messages
-            
+
         except Exception as e:
-            logger.error(f"❌ Error en get_messages para {topic}: {e}", exc_info=True)
-            # Si el consumer está cerrado, eliminarlo para recrearlo en el próximo intento
-            if topic in self.consumers and "closed" in str(e).lower():
-                logger.warning(f"🗑️ Eliminando consumer cerrado para {topic}")
-                del self.consumers[topic]
+            logger.error(f"❌ Error en get_messages para {topic}: {e}")
+            if topic in self.consumers and consumer_group in self.consumers[topic] and "closed" in str(e).lower():
+                logger.warning(f"🗑️ Eliminando consumer cerrado para {topic}, group: {consumer_group}")
+                del self.consumers[topic][consumer_group]
             return []
+
     
     def close(self):
         """Cierra las conexiones de Kafka"""
@@ -759,24 +753,21 @@ class EVCentral:
         """Test detallado de Kafka"""
         try:
             logger.info("🧪 INICIANDO TEST KAFKA DETALLADO...")
-            
-            # 1. Verificar que podemos enviar
+
             test_msg = {
                 'test': True,
                 'timestamp': datetime.now().isoformat(),
                 'source': 'central_test'
             }
-            
+
             logger.info("📤 Enviando mensaje de test a supply_response...")
             self.kafka_manager.send_message('supply_response', test_msg)
             logger.info("✅ Mensaje enviado")
-            
-            # 2. Verificar que podemos recibir
+
             logger.info("📥 Intentando recibir mensajes...")
-            messages = self.kafka_manager.get_messages('supply_response')
+            messages = self.kafka_manager.get_messages('supply_response', consumer_group='test_kafka_detailed_group')
             logger.info(f"📦 Mensajes recibidos: {len(messages)}")
-            
-            # 3. Verificar conexión directa
+
             from kafka import KafkaConsumer
             logger.info("🔍 Probando conexión directa...")
             test_consumer = KafkaConsumer(
@@ -787,16 +778,93 @@ class EVCentral:
                 group_id='test_direct_group',
                 consumer_timeout_ms=3000
             )
-            
+
             available = list(test_consumer)
             logger.info(f"👀 Mensajes disponibles (directo): {len(available)}")
             test_consumer.close()
-            
+
             return True
-            
+
         except Exception as e:
             logger.error(f"❌ Test Kafka falló: {e}", exc_info=True)
             return False
+
+    def handle_supply_ended(self, cp_id: str, driver_id: str = None):
+        """Maneja la finalización de suministro de forma consistente - NUEVO MÉTODO"""
+        logger.info(f"🛑 handle_supply_ended - CP: {cp_id}, Driver: {driver_id}")
+        
+        cp = self.database.get_charging_point(cp_id)
+        if not cp:
+            logger.error(f"❌ CP {cp_id} no encontrado en handle_supply_ended")
+            return
+        
+        if cp.status == "SUMINISTRANDO":
+            logger.info(f"🔄 Finalizando suministro para CP {cp_id}")
+            
+            # 1. Registrar transacción
+            transaction_data = self.record_transaction(cp, "COMPLETED")
+            
+            # 2. Enviar tickets
+            if transaction_data:
+                self.send_ticket(cp_id, transaction_data)
+            
+            # 3. Actualizar estado a ACTIVADO
+            self.update_cp_status(cp_id, "ACTIVADO")
+            
+            # 4. Resetear flags de control
+            cp.supply_ending = False
+            cp.supply_ended_time = datetime.now()
+            
+            logger.info(f"✅ Suministro finalizado correctamente - CP {cp_id} ahora en estado ACTIVADO")
+        else:
+            logger.warning(f"⚠️ Intento de finalizar suministro en CP {cp_id} que no estaba SUMINISTRANDO (estado: {cp.status})")
+
+    def handle_charging_failure(self, cp_id: str, failure_reason: str, driver_id: str = None):
+        """Maneja fallos de carga durante el suministro - NUEVO MÉTODO"""
+        logger.warning(f"🚨 handle_charging_failure - CP: {cp_id}, Razón: {failure_reason}, Driver: {driver_id}")
+        
+        cp = self.database.get_charging_point(cp_id)
+        if not cp:
+            logger.error(f"❌ CP {cp_id} no encontrado en handle_charging_failure")
+            return
+        
+        if cp.status == "SUMINISTRANDO":
+            logger.info(f"🛑 Detectada carga fallida en CP {cp_id} - Razón: {failure_reason}")
+            
+            # 1. Registrar transacción fallida
+            real_driver_id = driver_id or cp.driver_id
+            if real_driver_id:
+                transaction_data = self.record_failed_transaction(cp, failure_reason, real_driver_id)
+                if transaction_data:
+                    logger.info(f"❌ Transacción fallida registrada para CP {cp_id}")
+            
+            # 2. Enviar notificación de fallo
+            if real_driver_id and real_driver_id != "MANUAL":
+                self.send_failure_notification_to_driver(real_driver_id, cp_id, failure_reason, 
+                                                       transaction_data or {})
+            
+            # 3. Enviar comando STOP de emergencia
+            control_message = {
+                'cp_id': cp_id,
+                'command': 'STOP',
+                'reason': f'CARGA_FALLIDA: {failure_reason}',
+                'timestamp': datetime.now().isoformat(),
+                'source': 'central',
+                'emergency': True
+            }
+            self.kafka_manager.send_message('control_commands', control_message)
+            logger.info(f"🛑 Comando STOP de emergencia enviado a CP {cp_id}")
+            
+            # 4. Actualizar estado a AVERIADO
+            self.update_cp_status(cp_id, "AVERIADO")
+            
+            # 5. Resetear flags
+            cp.supply_ending = False
+            cp.supply_ended_time = datetime.now()
+            
+            logger.info(f"🔴 CP {cp_id} puesto en estado AVERIADO por carga fallida")
+        else:
+            logger.warning(f"⚠️ Carga fallida recibida para CP {cp_id} que no estaba SUMINISTRANDO (estado: {cp.status})")
 
     def start(self):
         """Inicia todos los servicios del sistema central"""
@@ -1083,8 +1151,8 @@ class EVCentral:
                 'transaction_id': transaction_id,
                 'cp_id': cp.cp_id,
                 'driver_id': cp.driver_id,  # ✅ Asegurar que driver_id se incluya
-                'energy_consumed': cp.current_consumption,
-                'amount': cp.current_amount,
+                'energy_consumed': cp.total_energy_supplied,
+                'amount': cp.total_revenue,
                 'price_per_kwh': cp.price_per_kwh,
                 'status': status,
                 'start_time': cp.last_heartbeat.isoformat() if cp.last_heartbeat else datetime.now().isoformat(),
@@ -1300,59 +1368,67 @@ class EVCentral:
             logger.error(f"❌ Error iniciando consumidor Kafka: {e}", exc_info=True)
     
     def kafka_consumer_loop(self):
-        """Loop principal para consumir mensajes de Kafka - CORREGIDO"""
+        """Loop principal para consumir mensajes de Kafka - VERSIÓN CORREGIDA"""
         logger.info("🚀 Kafka consumer loop iniciado correctamente")
-        
+
+        # ✅ Identificador único para esta instancia
+        instance_id = getattr(self, "id", "central")  # Usa self.id si existe, o "central" por defecto
+
         loop_count = 0
         while self.running:
             try:
                 loop_count += 1
-                logger.info(f"🔄 DENTRO DEL WHILE - Ciclo #{loop_count}")
-                
-                # ================================================================
-                # 🎯 MODIFICADO: Agregar nuevos topics para tickets
-                # ================================================================
-                topics_to_check = ['driver_requests', 'supply_flow', 'supply_response', 'control_commands', 'driver_tickets', 'engine_tickets']
-                
-                for topic in topics_to_check:
+                if loop_count % 10 == 0:
+                    logger.debug(f"🔄 Ciclo #{loop_count}")
+
+                critical_topics = ['supply_flow', 'supply_response', 'driver_requests']
+                normal_topics = ['control_commands', 'driver_tickets', 'engine_tickets']
+                all_messages = {}
+
+                # ✅ Procesar topics críticos
+                for topic in critical_topics:
                     try:
-                        logger.info(f"🔍 Verificando topic: {topic}")
-                        messages = self.kafka_manager.get_messages(topic)
-                        logger.info(f"📦 Resultado para {topic}: {len(messages)} mensajes")
-                        
+                        group_id = f"{instance_id}_{topic}_group"
+                        messages = self.kafka_manager.get_messages(topic, consumer_group=group_id)
                         if messages:
-                            logger.info(f"🎯 MENSAJES ENCONTRADOS en {topic}: {len(messages)}")
-                            for i, msg_data in enumerate(messages):
-                                message_content = msg_data['message']
-                                logger.info(f"   📝 Mensaje {i+1} (TIPO: {type(message_content)}): {message_content}")
-                                
-                                try:
-                                    if topic == 'supply_response':
-                                        self.process_supply_response(message_content)
-                                    elif topic == 'supply_flow':
-                                        self.process_supply_flow(message_content)
-                                    elif topic == 'driver_requests':
-                                        self.process_driver_request(message_content)
-                                    # Los topics driver_tickets y engine_tickets son para enviar, no recibir
-                                except Exception as e:
-                                    logger.error(f"❌ Error procesando mensaje en {topic}: {e}")
-                        
-                        else:
-                            logger.debug(f"📭 No hay mensajes en {topic}")
-                            
+                            all_messages[topic] = messages
+                            logger.debug(f"🎯 {len(messages)} mensajes en {topic}")
                     except Exception as e:
-                        logger.error(f"❌ Error en topic {topic}: {e}", exc_info=True)
-                
-                logger.info(f"💤 Esperando 2 segundos...")
-                time.sleep(2)
-                logger.info(f"✅ Ciclo #{loop_count} completado")
-                
+                        logger.error(f"❌ Error en topic crítico {topic}: {e}")
+
+                # ✅ Procesar mensajes críticos
+                for topic, messages in all_messages.items():
+                    for msg_data in messages:
+                        try:
+                            message_content = msg_data['message']
+                            if topic == 'supply_response':
+                                self.process_supply_response(message_content)
+                            elif topic == 'supply_flow':
+                                self.process_supply_flow(message_content)
+                            elif topic == 'driver_requests':
+                                self.process_driver_request(message_content)
+                        except Exception as e:
+                            logger.error(f"❌ Error procesando mensaje en {topic}: {e}")
+
+                # ✅ Procesar topics normales
+                for topic in normal_topics:
+                    try:
+                        group_id = f"{instance_id}_{topic}_group"
+                        messages = self.kafka_manager.get_messages(topic, consumer_group=group_id)
+                        if messages:
+                            logger.debug(f"📦 {len(messages)} mensajes en {topic}")
+                    except Exception as e:
+                        logger.error(f"❌ Error en topic normal {topic}: {e}")
+
+                time.sleep(0.5)
+
             except Exception as e:
-                logger.error(f"💥 ERROR CRÍTICO en kafka_consumer_loop: {e}", exc_info=True)
-                logger.info("💤 Esperando 5 segundos antes de reintentar...")
-                time.sleep(5)
-        
+                logger.error(f"💥 ERROR CRÍTICO en kafka_consumer_loop: {e}")
+                logger.info("💤 Esperando 1 segundo antes de reintentar...")
+                time.sleep(1)
+
         logger.info("🛑 Kafka consumer loop detenido")
+
 
     # ================================================================
     # 🎯 MODIFICADO: Procesar supply_response con manejo de STOP_SUPPLY y tickets
@@ -1454,7 +1530,7 @@ class EVCentral:
             logger.error(f"❌ Error procesando respuesta de suministro: {e}", exc_info=True)
     
     def process_supply_flow(self, message):
-        """Procesa mensajes de caudal de suministro - CON ACTUALIZACIONES AL DRIVER"""
+        """Procesa mensajes de caudal de suministro - VERSIÓN CORREGIDA CON MANEJO DE FALLOS"""
         logger.info(f"🎯 process_supply_flow llamado con: {message}")
         try:
             if isinstance(message, str):
@@ -1474,30 +1550,18 @@ class EVCentral:
             if not cp:
                 return
 
-            # Manejar finalización de suministro
+            # 🎯 CORRECCIÓN: Manejar finalización de suministro de forma unificada
             if reason == 'SUPPLY_ENDED':
-                if cp.status == "SUMINISTRANDO":
-                    logger.info(f"🛑 SUPPLY_ENDED recibido para CP {cp_id} - Iniciando finalización")
-                    
-                    cp.supply_ending = True
-                    cp.last_supply_message = datetime.now()
-                    
-                    # Registrar transacción inmediatamente
-                    transaction_data = self.record_transaction(cp, "COMPLETED")
-                    
-                    if transaction_data:
-                        self.send_ticket(cp_id, transaction_data)
-                    
-                    self.update_cp_status(cp_id, "ACTIVADO")
-                    
-                    cp.supply_ended_time = datetime.now()
-                    logger.info(f"✅ Suministro COMPLETADO para CP {cp_id}")
-                    
-                else:
-                    logger.warning(f"⚠️ SUPPLY_ENDED recibido para CP {cp_id} pero no estaba SUMINISTRANDO")
+                self.handle_supply_ended(cp_id, driver_id)
                 return
 
-            # 🎯 CORRECCIÓN: Obtener el driver_id REAL del punto de carga
+            # 🎯 NUEVO: Manejar carga fallida
+            if 'CARGA FALLIDA' in reason.upper() or 'FALLIDO' in reason.upper() or 'AVERÍA' in reason.upper():
+                logger.warning(f"🚨 Detectada carga fallida en mensaje supply_flow - CP: {cp_id}, Razón: {reason}")
+                self.handle_charging_failure(cp_id, reason, driver_id)
+                return
+
+            # Resto del código para suministro en progreso...
             real_driver_id = cp.driver_id if cp.driver_id else driver_id
             
             # 🎯 CORRECCIÓN: Solo enviar actualizaciones si es un conductor real (no MANUAL)
