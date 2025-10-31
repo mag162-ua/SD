@@ -1,4 +1,3 @@
-
 services:
   zookeeper:
     image: confluentinc/cp-zookeeper:7.4.0
@@ -51,11 +50,11 @@ services:
         kafka-topics --create --topic engine_status --partitions 3 --replication-factor 1 --bootstrap-server kafka:9092 || true &&
         kafka-topics --create --topic engine_suministro --partitions 3 --replication-factor 1 --bootstrap-server kafka:9092 || true &&
         kafka-topics --create --topic supply_flow --partitions 3 --replication-factor 1 --bootstrap-server kafka:9092 || true &&
-        kafka-topics --create --topic supply_response --partitions 3 --replication-factor 1 --bootstrap-server kafka:9092 || true &&
         kafka-topics --create --topic driver_responses --partitions 3 --replication-factor 1 --bootstrap-server kafka:9092 || true &&
         kafka-topics --create --topic driver_requests --partitions 3 --replication-factor 1 --bootstrap-server kafka:9092 || true &&
-        kafka-topics --create --topic control_commands --partitions 3 --replication-factor 1 --bootstrap-server kafka:9092 || true &&
+        kafka-topics --create --topic supply_response --partitions 3 --replication-factor 1 --bootstrap-server kafka:9092 || true &&
         kafka-topics --create --topic engine_tickets --partitions 3 --replication-factor 1 --bootstrap-server kafka:9092 || true &&
+        kafka-topics --create --topic driver_tickets --partitions 3 --replication-factor 1 --bootstrap-server kafka:9092 || true &&
         echo 'Tópicos creados:' &&
         kafka-topics --list --bootstrap-server kafka:9092
       "
@@ -64,7 +63,6 @@ services:
     networks:
       - kafka-network
 
-  #######DUPLICAR
   cp_engine:
     build: ./cp_engine
     depends_on:
@@ -74,14 +72,8 @@ services:
     networks:
       - kafka-network
     ports:
-      - "6000:6000"
-      - "6001:6001"
-      - "6002:6002"
-      - "6003:6003"
-      - "6004:6004"
-    environment: # <-- AÑADIDO
-      - LANG=C.UTF-8
-      - LC_ALL=C.UTF-8
+      - "6000-6009:6000"
+    scale: 1
 
   cp_monitor:
     build: ./cp_monitor
@@ -91,9 +83,7 @@ services:
     command: ["tail", "-f", "/dev/null"]
     networks:
       - kafka-network
-    environment: # <-- AÑADIDO
-      - LANG=C.UTF-8
-      - LC_ALL=C.UTF-8
+    scale: 1
 
   driver:
     build: ./driver
@@ -103,9 +93,7 @@ services:
     command: ["tail", "-f", "/dev/null"]
     networks:
       - kafka-network
-    environment: # <-- AÑADIDO
-      - LANG=C.UTF-8
-      - LC_ALL=C.UTF-8
+    scale: 1
 
   central:
     build: ./central
@@ -127,11 +115,7 @@ services:
       - LOG_DIR=/app/logs
       - DATA_FILE=/app/ev_central_data.json
       - BACKUP_DIR=/app/backups
-      - LANG=C.UTF-8
-      - LC_ALL=C.UTF-8
     command: ["tail", "-f", "/dev/null"]
 networks:
   kafka-network:
     driver: bridge
-
-
