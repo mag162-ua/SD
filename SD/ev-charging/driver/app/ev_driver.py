@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 # EV_Driver.py
 
@@ -90,23 +91,34 @@ class EV_Driver:
         print(f"\n{'='*80}")
         print("🔌 PUNTOS DE CARGA DISPONIBLES")
         print(f"{'='*80}")
-        print(f"{'ID':<8} {'Ubicación':<20} {'Estado':<15} {'Precio/kWh':<12}")
+        print(f"{'ID':<8} {'Ubicación':<20} {'Estado':<15} {'Precio/kWh':<12} {'Conductor':<12}")
         print(f"{'-'*80}")
         
         for cp in self.available_cps:
-            status_icon = {
-                "ACTIVADO": "🟢 DISPONIBLE",
-                "SUMINISTRANDO": "🔵 OCUPADO", 
-                "PARADO": "🟠 PARADO",
-                "AVERIADO": "🔴 AVERIADO",
-                "DESCONECTADO": "⚫ DESCONECTADO"
-            }.get(cp.get('status', 'DESCONECTADO'), "⚫ DESCONECTADO")
-            
-            precio = f"€{cp.get('price_per_kwh', 0):.3f}"
-            conductor = cp.get('driver_id', '-')
-            
-            print(f"{cp.get('cp_id', 'N/A'):<8} {cp.get('location', 'N/A'):<20} "
-                  f"{status_icon:<15} {precio:<12} {conductor:<12}")
+            try:
+                # Estado
+                status_icon = {
+                    "ACTIVADO": "🟢 DISPONIBLE",
+                    "SUMINISTRANDO": "🔵 OCUPADO", 
+                    "PARADO": "🟡 PARADO",
+                    "AVERIADO": "🔴 AVERIADO",
+                    "DESCONECTADO": "⚫ DESCONECTADO"
+                }.get(cp.get('status', 'DESCONECTADO'), "⚫ DESCONECTADO")
+                
+                # Precio (validado)
+                price_value = cp.get('price_per_kwh')
+                precio = f"€{float(price_value):.3f}" if price_value is not None else "N/A"
+                
+                # Otros campos
+                conductor = cp.get('driver_id') or '-'
+                cp_id = cp.get('cp_id') or 'N/A'
+                location = cp.get('location') or 'N/A'
+                
+                print(f"{cp_id:<8} {location:<20} {status_icon:<15} {precio:<12} {conductor:<12}")
+                
+            except Exception as e:
+                print(f"⚠️ Error mostrando CP: {e}")
+                continue
         
         print(f"{'='*80}")
     
@@ -173,7 +185,7 @@ class EV_Driver:
                                     return False
                 
                 time.sleep(1)
-                
+     
             except Exception as e:
                 print(f"❌ Error esperando autorización: {e}")
                 continue
