@@ -17,7 +17,10 @@ echo  EJECUTANDO ev_driver.py EN CADA INSTANCIA
 echo ================================
 echo.
 
-for /l %%i in (1,1,2) do (
+SET /P NUMERO_INSTANCIAS="Número de instancias : "
+
+
+for /l %%i in (1,1,%NUMERO_INSTANCIAS%) do (
     if %%i LSS 10 (
         set DRIVER_ID=DRIVER_00%%i
     ) else (
