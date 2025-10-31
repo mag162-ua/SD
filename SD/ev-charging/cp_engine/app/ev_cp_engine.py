@@ -90,6 +90,7 @@ class EV_CP_E:
     TOPICO_SUMINISTRO = "supply_response"
     TOPICO_CONTROL = "control_commands"
     TOPICO_TICKETS = "engine_tickets"
+    RUTA_FICHERO = "/app/estado_engine/"
     TIMEOUT = 2
 
     def __init__(self, IP_PUERTO_BROKER, PUERTO):
@@ -173,7 +174,7 @@ class EV_CP_E:
                         self.ID = mensaje.split('#')[1]
                         print(f"ID del engine asignado: {self.ID}")
                         self.estado = MENSAJES_CP_M.STATUS_OK.value
-                        self.cargar_estado()
+                        #self.cargar_estado()
                     if mensaje == MENSAJES_CP_M.STATUS_E.value+f"#{self.ID}":
                         respuesta = self.estado
                         print(f"Estado enviado al monitor: {respuesta}")
@@ -272,7 +273,7 @@ class EV_CP_E:
         self.ticket_actual = None  # Limpiar ticket actual al iniciar suministro   
         self.suministrar_actvio = True
         self.parar_suministro.clear()
-        self.total_kwh_suministrados = 0.0
+        #self.total_kwh_suministrados = 0.0
         ##########################################################NOTIFICAR A LA CENTRAL
         # Iniciar hilo de suministro
         suministro_thread = threading.Thread(target=self.suministrar_energia, daemon=True) ################################################################# DAEMON
@@ -288,45 +289,57 @@ class EV_CP_E:
         self.parar_suministro.set()
         time.sleep(4)  # Dar tiempo al hilo para terminar
         self.suministrar_actvio = False
+        self.total_kwh_suministrados = 0.0
         print("✅ Suministro detenido completamente")
 
     def suministrar_energia(self):
         """Hilo principal de suministro de energía - CORREGIDO"""
         print("⚡ Suministro de energía iniciado.")
         
-        while not self.parar_suministro.is_set():
-            self.total_kwh_suministrados += 0.1
-            self.guardar_estado()
-            # Enviar datos de suministro a la Central
-            mensaje = {
-                'cp_id': self.ID, 
-                'driver_id': "MANUAL", 
-                'kwh': round(self.total_kwh_suministrados, 1),
-                'timestamp': datetime.now().isoformat(),
-                'reason': MENSAJES_CP_M.SUMINISTRANDO.value ##### MENSAJE
-            }
-            self.producer.send(EV_CP_E.TOPICO_ACCION, json.dumps(mensaje))
-            self.producer.flush()
+        try: # <--- INICIO DEL BLOQUE DE MANEJO DE ERRORES
+            while not self.parar_suministro.is_set():
+                self.total_kwh_suministrados += 0.1
+                self.guardar_estado()
+                
+                # Enviar datos de suministro a la Central
+                mensaje = {
+                    'cp_id': self.ID, 
+                    'driver_id': "MANUAL", 
+                    'kwh': round(self.total_kwh_suministrados, 1),
+                    'timestamp': datetime.now().isoformat(),
+                    'reason': MENSAJES_CP_M.SUMINISTRANDO.value
+                }
+                
+                # 💥 SOLUCIÓN 1: Enviar el diccionario (la serialización la hace el productor)
+                self.producer.send(EV_CP_E.TOPICO_ACCION, mensaje)
+                self.producer.flush()
+                
+                print(f"⚡ Suministrando... {self.total_kwh_suministrados:.1f}kWh")
+                time.sleep(1)
             
-            print(f"⚡ Suministrando... {self.total_kwh_suministrados:.1f}kWh")
-            time.sleep(1)
-            #self.parar_suministro.wait(2)
-        
-        print("🔌 Hilo de suministro detenido y finalizado limpiamente.")
-        self.suministrar_actvio = False
-        
-        # Enviar mensaje final de parada
-        mensaje_final = {
-            'cp_id': self.ID, 
-            'kwh': round(self.total_kwh_suministrados, 1), 
-            'reason': 'SUPPLY_ENDED'
-        }
+            # CÓDIGO DE SALIDA LIMPIA (si self.parar_suministro.set() fue llamado)
+            print("🔌 Hilo de suministro detenido y finalizado limpiamente.")
+            self.suministrar_actvio = False
+            
+            # Enviar mensaje final de parada
+            mensaje_final = {
+                'cp_id': self.ID, 
+                'kwh': round(self.total_kwh_suministrados, 1), 
+                'reason': 'SUPPLY_ENDED'
+            }
+            # 💥 SOLUCIÓN 1 (de nuevo): Enviar el diccionario
+            self.producer.send(EV_CP_E.TOPICO_ACCION, mensaje_final)
+            self.producer.flush()
 
-        self.producer.send(EV_CP_E.TOPICO_ACCION, json.dumps(mensaje_final))
-        self.producer.flush()
+            # Resetear contadores
+            self.total_kwh_suministrados = 0.0
 
-        # Resetear contadores
-        self.total_kwh_suministrados = 0.0
+        except Exception as e:
+            # 💥 SOLUCIÓN 2: Capturar el error y notificar
+            print(f"❌ [ERROR CRÍTICO HILO SUMINISTRO] El suministro falló inmediatamente: {e}", file=sys.stderr)
+            # Limpiar estado local para no mostrarlo como activo en el menú
+            self.suministrar_actvio = True
+            self.total_kwh_suministrados = 99999.0
 
     def mostrar_menu(self):
         #self.espera_respuesta_menu.set()
@@ -466,6 +479,7 @@ class EV_CP_E:
 
             # ✅ Ahora que el ID está asignado, abrir Kafka con group_id único
             if self.abrir_kafka():
+                self.cargar_estado()
                 listener_thread_c = threading.Thread(target=self.escuchar_central, daemon=True)
                 listener_thread_c.start()
 
@@ -476,14 +490,14 @@ class EV_CP_E:
             "ID": self.ID,
             "Total_kWh_Suministrados": self.total_kwh_suministrados
         }
-        with open(f"estado_engine_{self.ID}.json", "w") as archivo:
+        with open(f"{EV_CP_E.RUTA_FICHERO}estado_engine_{self.ID}.json", "w") as archivo:
             json.dump(estado_info, archivo, indent=4)
         print(f"Estado del engine guardado en estado_engine_{self.ID}.json")
 
     def cargar_estado(self):
-        if os.path.exists(f"estado_engine_{self.ID}.json"):
+        if os.path.exists(f"{EV_CP_E.RUTA_FICHERO}estado_engine_{self.ID}.json"):
             try:
-                with open(f"estado_engine_{self.ID}.json", "r") as archivo:
+                with open(f"{EV_CP_E.RUTA_FICHERO}estado_engine_{self.ID}.json", "r") as archivo:
                     estado_info = json.load(archivo)
                     self.total_kwh_suministrados = estado_info.get("Total_kWh_Suministrados", 0.0)
                     self.parar_suministro.clear()
@@ -491,7 +505,7 @@ class EV_CP_E:
                     print(f"Estado del engine cargado: Total kWh suministrados = {self.total_kwh_suministrados} kWh")
                     suministrar_thread = threading.Thread(target=self.suministrar_energia, daemon=True)
                     suministrar_thread.start()
-                    os.remove(f"estado_engine_{self.ID}.json")
+                    os.remove(f"{EV_CP_E.RUTA_FICHERO}estado_engine_{self.ID}.json")
             except Exception as e:
                 print(f"[ERROR RESILIENCIA] Error al cargar el estado: {e}. Iniciando desde 0.")
                 self.total_kwh_suministrados = 0.0
