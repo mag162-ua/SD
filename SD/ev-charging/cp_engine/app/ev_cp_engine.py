@@ -102,10 +102,10 @@ class EV_CP_E:
         self.estado = MENSAJES_CP_M.STATUS_KO.value
         self.producer = None
         self.consumer = None
-        self.consumer_tickets = None  # Consumidor para tickets
+        #self.consumer_tickets = None  # Consumidor para tickets
         self.suministrar_actvio = False
         self.parar_suministro = threading.Event()
-        self.espera_respuesta_menu = threading.Event()
+        #self.espera_respuesta_menu = threading.Event()
         self.total_kwh_suministrados = 0.0
         self.ticket_actual = None
         print(f"Engine inicializado con IP_BROKER: {self.IP_BROKER}, PUERTO_BROKER: {self.PUERTO_BROKER}")
@@ -176,6 +176,7 @@ class EV_CP_E:
                         self.cargar_estado()
                     if mensaje == MENSAJES_CP_M.STATUS_E.value+f"#{self.ID}":
                         respuesta = self.estado
+                        print(f"Estado enviado al monitor: {respuesta}")
                         conexion_monitor.sendall(respuesta.encode())
 
             except socket.error as e:
@@ -212,7 +213,10 @@ class EV_CP_E:
                         except json.JSONDecodeError:
                             print("❌ Error: Mensaje no es JSON válido y se descartará.")
                             continue # Pasar al siguiente mensaje
-                        
+                    
+                    if not isinstance(mensaje_valor, dict):
+                        continue
+
                     cp_id = mensaje_valor.get('cp_id')
 
                     if not cp_id or str(cp_id) != str(self.ID):
@@ -234,8 +238,11 @@ class EV_CP_E:
                                 energy_consumed=mensaje_valor.get('energy_consumed'),
                                 amount=mensaje_valor.get('amount'),
                                 price_per_kwh=mensaje_valor.get('price_per_kwh'),
-                                start_time=mensaje_valor.get('start_time'),
-                                end_time=mensaje_valor.get('end_time'),
+                                #start_time=mensaje_valor.get('start_time'),
+                                #end_time=mensaje_valor.get('end_time'),
+                                start_time = datetime.fromisoformat(mensaje_valor.get('start_time').replace('Z', '+00:00')),
+                                end_time = datetime.fromisoformat(mensaje_valor.get('end_time').replace('Z', '+00:00')),
+
                                 timestamp=mensaje_valor.get('timestamp'),
                                 tiempo_pantalla=30
                             )
@@ -279,7 +286,7 @@ class EV_CP_E:
             return
         ##############################################333 CENTRAL NOTIFICAR
         self.parar_suministro.set()
-        time.sleep(1)  # Dar tiempo al hilo para terminar
+        time.sleep(4)  # Dar tiempo al hilo para terminar
         self.suministrar_actvio = False
         print("✅ Suministro detenido completamente")
 
@@ -302,7 +309,8 @@ class EV_CP_E:
             self.producer.flush()
             
             print(f"⚡ Suministrando... {self.total_kwh_suministrados:.1f}kWh")
-            self.parar_suministro.wait(1)
+            time.sleep(1)
+            #self.parar_suministro.wait(2)
         
         print("🔌 Hilo de suministro detenido y finalizado limpiamente.")
         self.suministrar_actvio = False
@@ -326,28 +334,25 @@ class EV_CP_E:
 
             os.system('cls' if os.name == 'nt' else 'clear')
             
-            if self.ID is None :
-                print(f"{self.IP_E}:{self.PUERTO_E} A la espera de conexión con un monitor...")
+            print(f"\n--- Menú del Engine {self.ID} : {self.IP_E}:{self.PUERTO_E}---")
+            print("1. Mostrar estado actual")
+            if self.estado == MENSAJES_CP_M.STATUS_OK.value:
+                print("2. Notificar avería")
             else:
-                print(f"\n--- Menú del Engine {self.ID} : {self.IP_E}:{self.PUERTO_E}---")
-                print("1. Mostrar estado actual")
-                if self.estado == MENSAJES_CP_M.STATUS_OK.value:
-                    print("2. Notificar avería")
-                else:
-                    print("2. Notificar restablecimiento")
-                if self.suministrar_actvio:
-                    print("3. Parar suministro de energía")
-                else:
-                    print("3. Suministrar energía")
-                print("4. Salir")
+                print("2. Notificar restablecimiento")
+            if self.suministrar_actvio:
+                print("3. Parar suministro de energía")
+            else:
+                print("3. Suministrar energía")
+            print("4. Salir")
+            print("-----------------------------------")
+            if self.suministrar_actvio:
+                print("⚠️  Suministro de energía ACTIVO ⚠️ ")
+                print(f"Total kWh suministrados hasta ahora: {self.total_kwh_suministrados:.2f} kWh")
                 print("-----------------------------------")
-                if self.suministrar_actvio:
-                    print("⚠️  Suministro de energía ACTIVO ⚠️ ")
-                    print(f"Total kWh suministrados hasta ahora: {self.total_kwh_suministrados:.2f} kWh")
-                    print("-----------------------------------")
-                if self.ticket_actual and self.ticket_actual.tiempo_pantalla > 0:
-                    self.ticket_actual.mostrar_ticket()
-                print("Seleccione una opción: ", end='')
+            if self.ticket_actual and self.ticket_actual.tiempo_pantalla > 0:
+                self.ticket_actual.mostrar_ticket()
+            print("Seleccione una opción: ", end='')
                 #response_menu_thread = threading.Thread(target=self.responder_menu, daemon=True)
                 #response_menu_thread.start()
 
@@ -430,6 +435,7 @@ class EV_CP_E:
 
     def run(self):
         print("Engine corriendo...")
+        '''
         if self.abrir_socket() and self.abrir_kafka():
             print("Monitor abierto correctamente.")
 
@@ -445,7 +451,26 @@ class EV_CP_E:
             #self.mostrar_menu()
             while True:
                 time.sleep(1)
+        '''
+        if self.abrir_socket():
+            print("Monitor abierto correctamente.")
 
+            # Iniciar hilo del monitor para recibir el ID
+            listener_thread_m = threading.Thread(target=self.escuchar_monitor, daemon=True)
+            listener_thread_m.start()
+
+            # 🔁 Esperar a que el monitor asigne el ID antes de abrir Kafka
+            while self.ID is None:
+                print("⏳ Esperando asignación de ID desde el monitor...")
+                time.sleep(0.1)
+
+            # ✅ Ahora que el ID está asignado, abrir Kafka con group_id único
+            if self.abrir_kafka():
+                listener_thread_c = threading.Thread(target=self.escuchar_central, daemon=True)
+                listener_thread_c.start()
+
+                self.mostrar_menu()
+            
     def guardar_estado(self):
         estado_info = {
             "ID": self.ID,
