@@ -1,0 +1,128 @@
+
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    networks:
+      - kafka-network
+
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://172.20.10.12:29092,
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    ports:
+      - "9092:9092"   # Para conexiones internas
+      - "29092:29092" # Para conexiones externas
+    networks:
+      - kafka-network
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--list", "--bootstrap-server", "localhost:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+
+  kafka-init:
+    image: confluentinc/cp-kafka:7.4.0
+    depends_on:
+      - kafka
+    command: > 
+      sh -c "
+        sleep 5 &&
+        echo 'Creando tópicos...' &&
+        kafka-topics --create --topic supply_flow --partitions 3 --replication-factor 1 --bootstrap-server kafka:9092 || true &&
+        kafka-topics --create --topic supply_response --partitions 3 --replication-factor 1 --bootstrap-server kafka:9092 || true &&
+        kafka-topics --create --topic driver_responses --partitions 3 --replication-factor 1 --bootstrap-server kafka:9092 || true &&
+        kafka-topics --create --topic driver_requests --partitions 3 --replication-factor 1 --bootstrap-server kafka:9092 || true &&
+        kafka-topics --create --topic control_commands --partitions 3 --replication-factor 1 --bootstrap-server kafka:9092 || true &&
+        kafka-topics --create --topic engine_tickets --partitions 3 --replication-factor 1 --bootstrap-server kafka:9092 || true &&
+        kafka-topics --create --topic driver_tickets --partitions 3 --replication-factor 1 --bootstrap-server kafka:9092 || true &&
+        echo 'Tópicos creados:' &&
+        kafka-topics --list --bootstrap-server kafka:9092
+      "
+    profiles:
+      - init
+    networks:
+      - kafka-network
+
+  cp_engine:
+    build: ./cp_engine
+    depends_on:
+      kafka:
+        condition: service_healthy
+    command: ["tail", "-f", "/dev/null"]
+    networks:
+      - kafka-network
+    ports:
+      - "6000-6009:6000"
+    environment: 
+      - LANG=C.UTF-8
+      - LC_ALL=C.UTF-8
+    volumes:
+      - ./engine_status:/app/estado_engine
+
+  cp_monitor:
+    build: ./cp_monitor
+    depends_on:
+      kafka:
+        condition: service_healthy
+    command: ["tail", "-f", "/dev/null"]
+    networks:
+      - kafka-network
+    environment:
+      - LANG=C.UTF-8
+      - LC_ALL=C.UTF-8
+
+
+  driver:
+    build: ./driver
+    depends_on:
+      kafka:
+        condition: service_healthy
+    command: ["tail", "-f", "/dev/null"]
+    networks:
+      - kafka-network
+    environment:
+      - LANG=C.UTF-8
+      - LC_ALL=C.UTF-8
+    volumes:
+      - ./suministros_driver:/app/suministros_driver
+
+  central:
+    build: ./central
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "5000:5000"
+    networks:
+      - kafka-network
+    volumes:
+      - ./central_logs:/app/logs  
+      - ./central_backups:/app/backups 
+    environment:
+      - SOCKET_HOST=0.0.0.0
+      - SOCKET_PORT=5000
+      - KAFKA_SERVERS=localhost:9092
+      - LOG_DIR=/app/logs
+      - DATA_FILE=/app/ev_central_data.json
+      - BACKUP_DIR=/app/backups
+      - LANG=C.UTF-8
+      - LC_ALL=C.UTF-8
+    command: ["tail", "-f", "/dev/null"]
+networks:
+  kafka-network:
+    driver: bridge
+
+
