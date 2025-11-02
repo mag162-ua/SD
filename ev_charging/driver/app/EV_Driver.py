@@ -441,7 +441,7 @@ class EV_Driver:
         
         while time.time() - start_time < timeout:
             try:
-                messages = self.consumer.poll(timeout_ms=3000)
+                messages = self.consumer.poll(timeout_ms=timeout)
                 
                 has_flow_update = False
                 current_energy = last_energy
@@ -558,14 +558,7 @@ class EV_Driver:
                 continue
         
         # TIMEOUT
-        print(f"\n{'='*60}")
-        print("⏰ TIMEOUT - TIEMPO MÁXIMO ALCANZADO")
-        print(f"{'='*60}")
-        print(f"⚡ Energía final: {last_energy:.2f} kWh")
-        print(f"💰 Importe final: €{last_amount:.2f}")
-        print(f"⏱️  Tiempo total: {int(time.time() - start_time)} segundos")
-        print("\n💾 Estado guardado para posible recuperación")
-        
+        self.cancel_supply(cp_id=cp_id)
         return self.wait_for_ticket_after_timeout(cp_id)
 
     def display_progress(self, cp_id: str, energy_delivered: float, current_amount: float, total_amount: float, flow_rate: float, power_kw: float, avg_power: float, elapsed_time: float, session_start: float):
@@ -602,7 +595,6 @@ class EV_Driver:
         # Barra de progreso simple
         progress = min(100, (energy_delivered / 50) * 100)
         bars = int(progress / 5)  # 20 barras total
-        print(f"📊 Progreso: [{'█' * bars}{'░' * (20 - bars)}] {progress:.1f}%")
         
         print(f"{'='*60}")
 
