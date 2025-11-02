@@ -102,6 +102,7 @@ class EV_CP_E:
         self.parar_suministro = threading.Event() # Evento para parar el suministro
         self.total_kwh_suministrados = 0.0 # Contador de kWh suministrados
         self.ticket_actual = None # Ticket actual en pantalla
+        self.averiado = False # Estado de avería
         print(f"Engine inicializado con IP_BROKER: {self.IP_BROKER}, PUERTO_BROKER: {self.PUERTO_BROKER}")
 
     def abrir_socket(self): #Intento de abrir socket para el monitor
@@ -157,6 +158,8 @@ class EV_CP_E:
             return False
 
     def escuchar_monitor(self):
+
+        self.socket_monitor.settimeout(15) #Timeout para evitar bloqueo infinito
         #Escucha mensajes del Monitor
         while True:
             conexion_monitor = None
@@ -171,8 +174,16 @@ class EV_CP_E:
                         self.estado = MENSAJES_CP_M.STATUS_OK.value
 
                     if mensaje == MENSAJES_CP_M.STATUS_E.value+f"#{self.ID}": #Si el mensaje es de estado devuelve el estado actual
+                        if not self.averiado:
+                            self.estado = MENSAJES_CP_M.STATUS_OK.value
+                        
                         respuesta = self.estado
                         conexion_monitor.sendall(respuesta.encode())
+
+            except socket.timeout:
+                self.estado = MENSAJES_CP_M.STATUS_KO.value
+                print("⏳ Timeout esperando conexión del monitor. Marcando estado como AVERIADO.")
+                continue  # Reintentar aceptar conexiones
 
             except socket.error as e: 
                 if e.errno == 9:
@@ -391,7 +402,7 @@ class EV_CP_E:
             if self.estado == MENSAJES_CP_M.STATUS_OK.value:
                 print(f"CP {self.ID} averiado")
                 self.estado = MENSAJES_CP_M.STATUS_KO.value
-
+                self.averiado = True
                 # Si está suministrando, parar
                 if self.suministrar_actvio:
                     self.detener_suministro()
@@ -399,6 +410,7 @@ class EV_CP_E:
             else:
                 print(f"CP {self.ID} reparado")
                 self.estado = MENSAJES_CP_M.STATUS_OK.value
+                self.averiado = False
 
         elif switch == "3": #Suministrar o parar suministro
             if self.estado == MENSAJES_CP_M.STATUS_OK.value and not self.suministrar_actvio: # Si está OK y no está suministrando
@@ -497,7 +509,7 @@ class EV_CP_E:
             time.sleep(1)
 
         if self.suministrar_actvio:
-            self.parar_suministro.set() 
+            #self.parar_suministro.set() 
             time.sleep(1.5)
 
         try: #Cerrar conexiones Kafka y socket
