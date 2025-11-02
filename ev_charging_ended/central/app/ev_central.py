@@ -18,7 +18,7 @@ def setup_logging():
     log_dir = os.getenv('LOG_DIR', '/app/logs')
     
     if not os.path.exists(log_dir):
-        os.makedirs(log_dir)
+        os.makedirs(log_dir, exist_ok=True)
         print(f"📁 Directorio de logs creado: {log_dir}")
     
     # Formato de logs

@@ -26,7 +26,7 @@ class EV_Driver:
         self.setup_kafka()
         
     def setup_kafka(self):
-        """Configura las conexiones Kafka"""
+        #Configura las conexiones Kafka
         try:
             self.producer = KafkaProducer(
                 bootstrap_servers=[self.bootstrap_servers],
@@ -52,7 +52,7 @@ class EV_Driver:
             print(f"❌ Error conectando a Kafka: {e}")
             raise
     
-    def get_available_cps(self):
+    def get_available_cps(self): # Obtiene los puntos de carga disponibles
         """Solicita a la central los puntos de carga disponibles"""
         try:
             print(f"\n📡 Solicitando CPs disponibles a la central...")
@@ -81,7 +81,7 @@ class EV_Driver:
             print(f"❌ Error solicitando CPs disponibles: {e}")
             return False
     
-    def display_available_cps(self):
+    def display_available_cps(self): # Muestra los puntos de carga disponibles
         """Muestra los puntos de carga disponibles"""
         if not self.available_cps:
             print("❌ No hay puntos de carga disponibles")
@@ -121,8 +121,7 @@ class EV_Driver:
         
         print(f"{'='*80}")
     
-    def request_supply(self, cp_id: str):
-        """Solicita suministro en un punto de carga específico - MODIFICADO: Primero pregunta conexión"""
+    def request_supply(self, cp_id: str): #Solicita suministro en un punto de carga específico
         try:
             print(f"\n🚀 Preparando solicitud de suministro en CP {cp_id}...")
             
@@ -130,7 +129,7 @@ class EV_Driver:
             print(f"\n🔌 CONEXIÓN REQUERIDA - CP {cp_id}")
             print("¿Ha conectado su vehículo al punto de carga? (s/n): ", end='')
             
-            connected = self.wait_for_connection()
+            connected = self.wait_for_connection() # Espera confirmación del conductor
             
             if not connected:
                 print("❌ Vehículo no conectado - Cancelando solicitud")
@@ -158,19 +157,19 @@ class EV_Driver:
             print(f"❌ Error solicitando suministro: {e}")
             return False
     
-    def wait_for_authorization(self, cp_id: str):
+    def wait_for_authorization(self, cp_id: str): # Espera autorización de la central
         """Espera la respuesta de autorización de la central"""
         print(f"⏳ Esperando autorización de la central para CP {cp_id}...")
         
         start_time = time.time()
         timeout = 30  # 30 segundos de timeout
         
-        while time.time() - start_time < timeout:
+        while time.time() - start_time < timeout: # Bucle hasta timeout
             try:
                 # Buscar mensajes de respuesta
                 messages = self.consumer.poll(timeout_ms=2000)
                 
-                for topic_partition, message_batch in messages.items():
+                for topic_partition, message_batch in messages.items(): # Procesar mensajes
                     for message in message_batch:
                         if message.value:
                             response = message.value
@@ -181,19 +180,19 @@ class EV_Driver:
                                 
                                 status = response.get('status')
                                 
-                                if status == 'AUTHORIZED':
+                                if status == 'AUTHORIZED': # Autorizado
                                     print(f"✅ AUTORIZADO - Suministro autorizado en CP {cp_id}")
                                     print(f"📍 Ubicación: {response.get('location', 'N/A')}")
                                     print(f"💰 Precio: €{response.get('price_per_kwh', 0):.3f}/kWh")
                                     # 🆕 AHORA DIRECTAMENTE INICIAMOS EL SUMINISTRO (ya está conectado)
                                     return self.handle_authorized_supply(cp_id, response)
                                 
-                                elif status == 'DENIED':
+                                elif status == 'DENIED': # Denegado
                                     reason = response.get('message', 'Razón no especificada')
                                     print(f"❌ DENEGADO - {reason}")
                                     return False
                                 
-                                elif status == 'ERROR':
+                                elif status == 'ERROR': # Error de comunicación
                                     print(f"❌ ERROR - {response.get('message', 'Error de comunicación')}")
                                     return False
                 
@@ -206,12 +205,10 @@ class EV_Driver:
         print("❌ Timeout esperando autorización")
         return False
     
-    def handle_authorized_supply(self, cp_id: str, auth_response: dict):
-        """Maneja el suministro autorizado - MODIFICADO: Ya no pregunta conexión"""
+    def handle_authorized_supply(self, cp_id: str, auth_response: dict):# Maneja el suministro autorizado
         try:
             print("✅ Vehículo ya conectado - Iniciando suministro...")
             
-            # El suministro ahora es manejado por la central y el CP
             # Esperamos a que termine
             return self.wait_for_supply_completion(cp_id)
                 
@@ -219,19 +216,16 @@ class EV_Driver:
             print(f"❌ Error durante el suministro autorizado: {e}")
             return False
     
-    def wait_for_connection(self):
-        """Espera a que el conductor confirme la conexión del vehículo"""
+    def wait_for_connection(self): # Espera confirmación de conexión del conductor
         try:
-            # En una aplicación real, esto sería una interfaz gráfica
-            # Por ahora usamos input para simular
+            # Input para la confirmación
             response = input().strip().lower()
             return response in ['s', 'si', 'sí', 'y', 'yes']
         except Exception as e:
             print(f"\n❌ Error leyendo input (asumiendo NO): {e}")
             return False
     
-    def wait_for_supply_completion(self, cp_id: str):
-        """Espera a que el suministro se complete - CON FLUJO EN TIEMPO REAL"""
+    def wait_for_supply_completion(self, cp_id: str): # Espera finalización del suministro
         print(f"⚡ Suministro en progreso - CP {cp_id}")
         print("Esperando finalización...")
         
@@ -239,16 +233,16 @@ class EV_Driver:
         timeout = 100  # 100 segundos máximo
         last_update = time.time()
         
-        while time.time() - start_time < timeout:
+        while time.time() - start_time < timeout: # Bucle hasta timeout
             try:
                 messages = self.consumer.poll(timeout_ms=5000)
                 
-                for topic_partition, message_batch in messages.items():
+                for topic_partition, message_batch in messages.items(): # Procesar mensajes
                     for message in message_batch:
                         if message.value:
                             response = message.value
                             
-                            # 🎯 NUEVO: Procesar actualizaciones de flujo en tiempo real
+                            # Procesar actualizaciones de flujo
                             if (response.get('driver_id') == self.driver_id and 
                                 response.get('type') == 'FLOW_UPDATE'):
                                 
@@ -265,7 +259,7 @@ class EV_Driver:
                                 
                                 continue
                             
-                            # 🎯 Procesar tickets del topic específico
+                            # Procesar tickets del topic específico
                             if (response.get('driver_id') == self.driver_id and 
                                 response.get('type') == 'CHARGING_TICKET'):
                                 
@@ -294,7 +288,7 @@ class EV_Driver:
                 continue
         
         print("❌ Timeout esperando finalización del suministro")
-        # 🆕 ENVIAR CANCELACIÓN POR TIMEOUT
+        # Enviar cancelación por timeout
         self.producer.send('driver_requests', {
             'driver_id': self.driver_id,
             'cp_id': cp_id,
@@ -308,18 +302,17 @@ class EV_Driver:
         # Esperar un poco por si llega el ticket
         return self.wait_for_ticket_after_timeout(cp_id)
     
-    def wait_for_ticket_after_timeout(self, cp_id: str):
-        """Espera un ticket después de un timeout"""
+    def wait_for_ticket_after_timeout(self, cp_id: str): # Espera ticket tras timeout 
         print("⏳ Esperando ticket final después del timeout...")
         
         ticket_timeout = 10  # Esperar máximo 10 segundos por el ticket
         
         start_time = time.time()
-        while time.time() - start_time < ticket_timeout:
+        while time.time() - start_time < ticket_timeout: # Bucle hasta timeout
             try:
                 messages = self.consumer.poll(timeout_ms=2000)
                 
-                for topic_partition, message_batch in messages.items():
+                for topic_partition, message_batch in messages.items(): # Procesar mensajes
                     for message in message_batch:
                         if message.value:
                             response = message.value
@@ -348,8 +341,7 @@ class EV_Driver:
         print("❌ No se recibió ticket después del timeout")
         return False
     
-    def display_charging_ticket(self, ticket_data: dict):
-        """Muestra el ticket de carga al conductor"""
+    def display_charging_ticket(self, ticket_data: dict): # Muestra el ticket de carga
         print(f"\n{'='*60}")
         print("🎫 TICKET DE CARGA - RESUMEN")
         print(f"{'='*60}")
@@ -365,8 +357,7 @@ class EV_Driver:
         print(f"✅ CARGA COMPLETADA EXITOSAMENTE")
         print(f"{'='*60}\n")
     
-    def display_cancellation_ticket(self, ticket_data: dict):
-        """Muestra el ticket de cancelación al conductor"""
+    def display_cancellation_ticket(self, ticket_data: dict): # Muestra el ticket de cancelación
         print(f"\n{'='*60}")
         print("🎫 TICKET DE CANCELACIÓN - RESUMEN")
         print(f"{'='*60}")
@@ -383,8 +374,7 @@ class EV_Driver:
         print(f"🛑 CARGA CANCELADA")
         print(f"{'='*60}\n")
     
-    def wait_for_response(self, expected_type: str, timeout: int = 10):
-        """Espera una respuesta específica de la central"""
+    def wait_for_response(self, expected_type: str, timeout: int = 10): # Espera respuesta específica
         start_time = time.time()
         
         while time.time() - start_time < timeout:
@@ -407,8 +397,7 @@ class EV_Driver:
         
         return None
     
-    def cancel_supply(self, cp_id: str):
-        """Cancela un suministro en curso"""
+    def cancel_supply(self, cp_id: str): # Cancela un suministro en curso
         try:
             cancel_message = {
                 'driver_id': self.driver_id,
@@ -425,8 +414,7 @@ class EV_Driver:
         except Exception as e:
             print(f"❌ Error cancelando suministro: {e}")
     
-    def process_service_file(self, file_path: str):
-        """Procesa un archivo con múltiples servicios"""
+    def process_service_file(self, file_path: str): # Procesa un archivo de servicios
         try:
             if not os.path.exists(file_path):
                 print(f"❌ Archivo no encontrado: {file_path}")
@@ -441,7 +429,7 @@ class EV_Driver:
             
             print(f"\n📁 Procesando {len(services)} servicios del archivo: {file_path}")
             
-            for i, service in enumerate(services, 1):
+            for i, service in enumerate(services, 1): # Iterar servicios
                 print(f"\n{'='*50}")
                 print(f"📦 PROCESANDO SERVICIO {i}/{len(services)}")
                 print(f"{'='*50}")
@@ -466,8 +454,7 @@ class EV_Driver:
         except Exception as e:
             print(f"❌ Error procesando archivo de servicios: {e}")
 
-    def leer_archivo(self, archivo: str):
-        """Lee un archivo de servicios y devuelve la lista de CPs"""
+    def leer_archivo(self, archivo: str): # Lee un archivo de servicios y devuelve la lista de CPs
 
         if not os.path.exists(archivo):
                 print(f"❌ Archivo no encontrado: {archivo}")
@@ -489,7 +476,7 @@ class EV_Driver:
             print(f"❌ Error leyendo archivo de servicios: {e}")
             return []
     
-    def interactive_mode(self):
+    def interactive_mode(self): # Modo interactivo para solicitar servicios manualmente
         """Modo interactivo para solicitar servicios manualmente"""
         print(f"\n🎮 MODO INTERACTIVO - Driver {self.driver_id}")
         print(f"{'='*50}")

@@ -29,7 +29,7 @@ for /l %%i in (1,1,%NUMERO_INSTANCIAS%) do (
         set DRIVER_ID=DRIVER_0!ID!
     )
     echo Ejecutando Driver %%i con ID !DRIVER_ID!...
-    start "Driver !ID!" cmd /k docker exec -it p1-driver-1 python ev_driver.py kafka:9092 !DRIVER_ID!
+    start "Driver !ID!" cmd /k docker exec -it ev_charging_ended-driver-1 python ev_driver.py kafka:9092 !DRIVER_ID!
 )
 
 echo.

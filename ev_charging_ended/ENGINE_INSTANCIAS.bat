@@ -24,7 +24,7 @@ SET /P PUERTO_INI="Puerto inicial : "
 for /l %%i in (1,1,%NUMERO_INSTANCIAS%) do (
     set /a PUERTO_E=%PUERTO_INI% + %%i - 1
     echo Ejecutando CP Engine %%i en puerto !PUERTO_E!...
-    start "Engine %%i" cmd /k docker exec -it p1-cp_engine-1 python ev_cp_engine.py kafka:9092 !PUERTO_E!
+    start "Engine %%i" cmd /k docker exec -it ev_charging_ended-cp_engine-1 python ev_cp_engine.py kafka:9092 !PUERTO_E!
 )
 
 echo.
