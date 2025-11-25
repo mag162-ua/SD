@@ -10,4 +10,4 @@ ECHO ===========================================
 ECHO Iniciando servicios de Kafka y Docker Compose...
 ECHO ===========================================
 
-CMD /k
+pause

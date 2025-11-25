@@ -24,7 +24,8 @@ SET /P ID_INI="ID inicial : "
 SET /P PUERTO_INI="Puerto inicial : "
 
 for /l %%i in (1,1,%NUMERO_INSTANCIAS%) do (
-    set /a PUERTO_E=%PUERTO_INI% + %%i - 2 + %ID_INI%
+    REM set /a PUERTO_E=%PUERTO_INI% + %%i - 2 + %ID_INI%
+    set /a PUERTO_E=%PUERTO_INI% + %%i - 1
     set /a ID=%ID_INI% + %%i - 1
     echo Ejecutando CP Monitor %%i en puerto !PUERTO_E! conectado a CP Engine 1...
     start "Monitor %%i" cmd /k docker exec -it ev_charging-cp_monitor-%%i python EV_CP_M.py cp_engine:!PUERTO_E! central:5000 !ID!
