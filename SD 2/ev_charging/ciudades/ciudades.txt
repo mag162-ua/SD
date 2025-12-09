@@ -1,0 +1,9 @@
+Madrid,ES
+Oslo,NO
+Montreal
+Nueva York
+London
+Tokyo
+Sydney
+Río de Janeiro
+Ciudad de México

@@ -1,0 +1,23 @@
+{
+  "charging_points": [
+    {
+      "cp_id": "1",
+      "location": "Oslo,NO",
+      "price_per_kwh": 0.52,
+      "status": "ACTIVADO",
+      "current_consumption": 0.0,
+      "current_amount": 0.0,
+      "driver_id": null,
+      "last_heartbeat": "2025-12-09T12:08:01.464508",
+      "total_energy_supplied": 0.0,
+      "total_revenue": 0.0,
+      "registration_date": "2025-12-09T12:07:17.333824",
+      "last_supply_message": null,
+      "supply_ending": false,
+      "supply_ended_time": null
+    }
+  ],
+  "drivers": [],
+  "transactions": [],
+  "last_save": "2025-12-09T12:08:01.496375"
+}

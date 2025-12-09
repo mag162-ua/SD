@@ -10,7 +10,9 @@ import time
 import logging
 from datetime import datetime
 from typing import Dict, List, Optional
+#from flask import Flask, request, jsonify # <--- NUEVO
 
+# ... resto de imports ...
 # Configuración de logging MEJORADA para Docker
 def setup_logging():
     """Configuración logging """
@@ -614,7 +616,7 @@ class SocketServer:
             
                 status_changed = False
                 # SOLO cambiar si DESCONECTADO
-                if cp.status == "DESCONECTADO" or cp.status == "AVERIADO":
+                if cp.status == "DESCONECTADO": #or cp.status == "AVERIADO":     Cambio para weather
                     self.central.update_cp_status(cp_id, "ACTIVADO")
                     logger.info(f"🔄 CP {cp_id} reactivado - Estado cambiado a ACTIVADO")
                     status_changed = True
@@ -858,6 +860,47 @@ class EVCentral:
         else:
             logger.warning(f"⚠️ Carga fallida recibida para CP {cp_id} que no estaba SUMINISTRANDO (estado: {cp.status})")
 
+    def process_external_command(self, message):
+        """Procesa comandos que vienen de la API (Weather) a través de Kafka"""
+        try:
+            # Aseguramos que message es un diccionario
+            if isinstance(message, str):
+                message = json.loads(message)
+                
+            source = message.get('source')
+            cp_id = message.get('cp_id')
+            command = message.get('command')
+            
+            # Solo procesamos si viene de la API (api_weather)
+            if source == 'api_weather':
+                logger.info(f"📨 Comando externo recibido: {command} para CP {cp_id}")
+                
+                cp = self.database.get_charging_point(cp_id)
+                if not cp:
+                    logger.warning(f"⚠️ Comando para CP desconocido: {cp_id}")
+                    return
+
+                if command == 'STOP':
+                    # 1. Si está cargando, cerramos la transacción
+                    if cp.status == "SUMINISTRANDO":
+                        self.record_transaction(cp, "STOPPED_BY_WEATHER")
+                        # Enviar STOP al Engine también para que corte la luz
+                        self.send_control_command(cp_id, "STOP")
+                    
+                    # 2. Cambiamos el estado a AVERIADO (Bloqueo climático)
+                    self.update_cp_status(cp_id, "AVERIADO")
+                    logger.warning(f"❄️ CP {cp_id} bloqueado por alerta climática.")
+
+                elif command == 'RESUME':
+                    # Solo reactivar si estaba averiado
+                    if cp.status == "AVERIADO":
+                        self.update_cp_status(cp_id, "ACTIVADO")
+                        # Opcional: Enviar RESUME al Engine si soporta ese comando
+                        logger.info(f"☀️ CP {cp_id} desbloqueado por clima.")
+
+        except Exception as e:
+            logger.error(f"❌ Error procesando comando externo: {e}", exc_info=True)
+
     def start(self):
         """Inicia servicios del sistema central"""
         logger.info("🚀 Iniciando EV_Central...")
@@ -882,7 +925,7 @@ class EVCentral:
         # Console input en hilo separado
         console_thread = threading.Thread(target=self.handle_console_input, daemon=True)
         console_thread.start()
-        
+
         self.show_control_panel()
         
         logger.info("✅ EV_Central iniciado correctamente")
@@ -1380,6 +1423,9 @@ class EVCentral:
                         messages = self.kafka_manager.get_messages(topic, consumer_group=group_id)
                         if messages:
                             logger.debug(f"📦 {len(messages)} mensajes en {topic}")
+                            if topic == 'control_commands':
+                                for msg_data in messages:
+                                    self.process_external_command(msg_data['message'])
                     except Exception as e:
                         logger.error(f"❌ Error en topic normal {topic}: {e}")
 
