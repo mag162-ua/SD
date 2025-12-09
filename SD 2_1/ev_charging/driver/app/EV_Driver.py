@@ -354,7 +354,7 @@ class EV_Driver:
         start_time = time.time()
         timeout = 30
         
-        while time.time() - start_time < timeout:
+        while True:#time.time() - start_time < timeout:
             try:
                 # Buscar mensajes respuesta
                 messages = self.consumer.poll(timeout_ms=2000)
@@ -393,11 +393,11 @@ class EV_Driver:
             except Exception as e:
                 print(f"❌ Error esperando autorización: {e}")
                 continue
-        
+        '''
         print("❌ Timeout esperando autorización")
         self.clear_supply_state()  # Limpiar timeout
         return False
-    
+        '''
     def handle_authorized_supply(self, cp_id: str, auth_response: dict):
         """Maneja el suministro autorizado"""
         try:
