@@ -33,6 +33,7 @@ class MENSAJES_CP_M(enum.Enum):
 class EV_CP_M:
 
     REGISTRY_URL=os.getenv('REGISTRY_URL', "https://registry:8080")  # URL del registro desde variable de entorno
+    RUTA_CIUDADES = "/app/ciudades/"  # Ruta de las ciudades, se asume que está en el contenedor
 
     def __init__(self, IP_PUERTO_E, IP_PUERTO_C, ID, LOCALIZACION, KWH):
         self.IP_E, self.PUERTO_E = IP_PUERTO_E.split(':')      # Dirección IP y puerto del emulador EV
@@ -46,6 +47,24 @@ class EV_CP_M:
         self.clave_acceso = ""             # Clave secreta para la comunicación segura
         print(f"Monitor {self.ID} inicializado con IP_PUERTO_E: {IP_PUERTO_E}, IP_PUERTO_C: {IP_PUERTO_C}")
     
+    def ciudad():
+        if os.path.exists(f"{EV_CP_M.RUTA_CIUDADES}ciudades.txt"):
+            try:
+                with open(f"{EV_CP_M.RUTA_CIUDADES}ciudades.txt", "r") as archivo:
+                    ciudades = [linea.strip() for linea in archivo if linea.strip()]  # Leer ciudades del archivo
+                    if not ciudades:
+                        print("No se encontraron ciudades en el archivo.")
+                        return "Desconocida"
+                    ciudad = random.choice(ciudades)  # Selecciona una ciudad aleatoria
+                    print(f"Ciudad seleccionada: {ciudad}")
+                    return ciudad
+            except Exception as e:
+                print(f"Error al cargar las ciudades: {e}")
+                return "Desconocida"
+        else:
+            print(f"Archivo de ciudades no encontrado en {EV_CP_M.RUTA_CIUDADES}ciudades.json")
+            return "Desconocida"
+
     def dar_de_alta(self):
         # Lógica para obtener la clave de acceso del registro
         if not EV_CP_M.REGISTRY_URL:
@@ -253,7 +272,7 @@ class EV_CP_M:
 
             os.system('cls' if os.name == 'nt' else 'clear') #Limpiar pantalla
             
-            print(f"\n--- Menú del monitor {self.ID} ---")
+            print(f"\n--- Menú del monitor {self.ID} - {self.ciudad} - {self.kwh}€/KWh---")
             if self.autorizado:
                 print("1. Dar de baja el CP") #Opción para desautorizar
             else:
@@ -346,8 +365,8 @@ if __name__ == "__main__":
         print("Uso: python ev_cp_monitor.py <IP_ENGINE:PUERTO_ENGINE> <IP_CENTRAL:PUERTO_CENTRAL> <ID>")
         sys.exit(1)
     
-    faker = Faker()
-    monitor = EV_CP_M(sys.argv[1], sys.argv[2], sys.argv[3], faker.city(), float(faker.random_number(digits=2, fix_len=True))/100)
+    #faker = Faker()
+    monitor = EV_CP_M(sys.argv[1], sys.argv[2], sys.argv[3], EV_CP_M.ciudad(), round(random.random(), 2))
 
     try:
         monitor.run()
