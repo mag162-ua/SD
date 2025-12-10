@@ -115,14 +115,14 @@ class EV_CP_E:
                 self.socket_monitor.bind((self.IP_E, self.PUERTO_E))
                 self.socket_monitor.listen(5)
                 print(f"Socket abierto en {self.IP_E}:{self.PUERTO_E}")
-                #EV_CP_E.PUERTO_BASE += 1
+                EV_CP_E.PUERTO_BASE += 1
                 return True
             
             except OSError as e: #Si el puerto está en uso, probar con el siguiente
                 print(f"Error al abrir el socket: {e}. Reintentando...")
                 self.socket_monitor.close()
-                #self.PUERTO_E += 1
-                #EV_CP_E.PUERTO_BASE += 1
+                self.PUERTO_E += 1
+                EV_CP_E.PUERTO_BASE += 1
 
             except Exception as e:
                 print(f"Error al abrir el socket: {e}")

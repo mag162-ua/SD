@@ -1,4 +1,2 @@
 kafka-python==2.0.2
-flask
-requests
-faker
+faker==37.11.0

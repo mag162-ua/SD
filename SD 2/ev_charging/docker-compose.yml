@@ -75,40 +75,6 @@ services:
   
   # =========================================================
 
-  weather:
-      image: python:3.9-slim
-      container_name: ev_charging-weather-1
-      volumes:
-        - ./weather/app:/app # Monta tu carpeta actual dentro
-      working_dir: /app
-      command: sh -c "pip install requests && python -u EV_W.py"
-      environment:
-        - CENTRAL_URL=http://api_central:8090/api/weather # Nota: usa el nombre del servicio 'central', no localhost
-        #- OW_API_KEY=d77ed952764846a75a86e7ecf11df223
-      depends_on:
-        - api_central
-      networks:
-        - kafka-network
-
-  api_central:
-    build: ./central  # Usa la misma carpeta/imagen porque necesita las mismas librerias
-    depends_on:
-      - central
-      - kafka
-    ports:
-      - "8090:8090" # El puerto sale por aquí ahora
-    networks:
-      - kafka-network
-    volumes:
-      # MISMO VOLUMEN PARA LEER EL JSON QUE GENERA LA CENTRAL
-      - central_data:/app
-      - ./api_central/app:/code
-    environment:
-      - KAFKA_SERVERS=kafka:9092
-      - DATA_FILE=/app/ev_central_data.json
-      - API_PORT=8090
-    command: python -u /code/EV_API_Central.py
-
   cp_engine:
     build: ./cp_engine
     depends_on:
@@ -163,7 +129,6 @@ services:
     networks:
       - kafka-network
     volumes:
-      - central_data:/app
       - ./central_logs:/app/logs  
       - ./central_backups:/app/backups 
     environment:
@@ -179,6 +144,5 @@ services:
 networks:
   kafka-network:
     driver: bridge
-volumes:
-  central_data:
+
 

@@ -354,7 +354,7 @@ class EV_Driver:
         start_time = time.time()
         timeout = 30
         
-        while True:#time.time() - start_time < timeout:
+        while time.time() - start_time < timeout:
             try:
                 # Buscar mensajes respuesta
                 messages = self.consumer.poll(timeout_ms=2000)
@@ -393,11 +393,11 @@ class EV_Driver:
             except Exception as e:
                 print(f"❌ Error esperando autorización: {e}")
                 continue
-        '''
+        
         print("❌ Timeout esperando autorización")
         self.clear_supply_state()  # Limpiar timeout
         return False
-        '''
+    
     def handle_authorized_supply(self, cp_id: str, auth_response: dict):
         """Maneja el suministro autorizado"""
         try:
@@ -436,9 +436,10 @@ class EV_Driver:
         
         # Estadísticas iniciales
         print(f"🕐 Hora de inicio: {datetime.now().strftime('%H:%M:%S')}")
+        print(f"⏱️  Tiempo máximo de sesión: {timeout} segundos")
         print("=" * 60)
         
-        while True:
+        while time.time() - start_time < timeout:
             try:
                 messages = self.consumer.poll(timeout_ms=timeout)
                 
@@ -542,13 +543,13 @@ class EV_Driver:
                             print(f"💰 Último importe registrado: €{last_amount:.2f}")
                         
                         last_display_update = current_time
-                '''
+                
                 # Mostrar barra de progreso cada 30 segundos
                 elapsed_total = time.time() - start_time
                 if int(elapsed_total) % 30 == 0 and elapsed_total > 5:
                     progress_percent = min(100, (elapsed_total / timeout) * 100)
                     self.display_progress_bar(progress_percent, elapsed_total, timeout)
-                '''  
+                    
                 time.sleep(1)
                 
             except Exception as e:
