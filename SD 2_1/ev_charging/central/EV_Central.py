@@ -10,8 +10,6 @@ import time
 import logging
 from datetime import datetime
 from typing import Dict, List, Optional
-import psycopg2
-from psycopg2 import pool, extras, OperationalError
 
 # Configuración de logging MEJORADA para Docker
 def setup_logging():
@@ -20,7 +18,7 @@ def setup_logging():
     log_dir = os.getenv('LOG_DIR', '/app/logs')
     
     if not os.path.exists(log_dir):
-        os.makedirs(log_dir, exist_ok=True)
+        os.makedirs(log_dir,exist_ok = True)
         print(f"📁 Directorio de logs creado: {log_dir}")
     
     # Formato de logs
@@ -119,30 +117,22 @@ class ChargingPoint:
         return cp
 
 class DatabaseManager:
-    """Gestor de base de datos PostgreSQL con persistencia"""
+    """Gestor de base de datos con persistencia en archivo JSON"""
     
-    def __init__(self):
+    def __init__(self, data_file: str = None):
+        if data_file is None:
+            data_file = os.getenv('DATA_FILE', '/app/data/ev_central_data.json')
+        
+        self.data_file = data_file
         self.charging_points: Dict[str, ChargingPoint] = {}
         self.drivers = set()
         self.transactions = []
         
-        # Configuración de conexión a PostgreSQL desde variables de entorno
-        self.db_config = {
-            'host': os.getenv('DB_HOST', 'postgres'),
-            'database': os.getenv('DB_NAME', 'ev_db'),
-            'user': os.getenv('DB_USER', 'user'),
-            'password': os.getenv('DB_PASSWORD', 'password'),
-            'port': os.getenv('DB_PORT', '5432')
-        }
-        
-        # Pool de conexiones
-        self.connection_pool = None
-        
-        # Intentar conectar con reintentos
-        self.connect_with_retries(max_retries=15, retry_interval=3)
-        
-        # Inicializar base de datos
-        self.init_database()
+        # Crear directorio si no existe
+        data_dir = os.path.dirname(self.data_file)
+        if data_dir and not os.path.exists(data_dir):
+            os.makedirs(data_dir)
+            logger.info(f"📁 Directorio de datos creado: {data_dir}")
         
         # Cargar datos existentes
         data_loaded = self.load_data()
@@ -150,311 +140,139 @@ class DatabaseManager:
         if not data_loaded:
             logger.info("🚀 Sistema iniciado sin datos previos. Esperando registro de puntos de carga...")
     
-    def connect_with_retries(self, max_retries=15, retry_interval=3):
-        """Intenta conectar a PostgreSQL con reintentos"""
-        logger.info("🔌 Conectando a PostgreSQL...")
-        logger.info(f"📊 Configuración DB: host={self.db_config['host']}, db={self.db_config['database']}, user={self.db_config['user']}")
-        
-        for attempt in range(max_retries):
-            try:
-                logger.info(f"🔄 Intentando conectar a PostgreSQL (intento {attempt+1}/{max_retries})...")
-                
-                # Intentar conexión simple primero
-                test_conn = psycopg2.connect(
-                    host=self.db_config['host'],
-                    database=self.db_config['database'],
-                    user=self.db_config['user'],
-                    password=self.db_config['password'],
-                    port=self.db_config['port'],
-                    connect_timeout=5
-                )
-                test_conn.close()
-                
-                # Crear pool de conexiones
-                self.connection_pool = pool.SimpleConnectionPool(
-                    1, 20,
-                    host=self.db_config['host'],
-                    database=self.db_config['database'],
-                    user=self.db_config['user'],
-                    password=self.db_config['password'],
-                    port=self.db_config['port']
-                )
-                
-                logger.info("✅ Conexión a PostgreSQL establecida correctamente")
-                return True
-                
-            except OperationalError as e:
-                if attempt < max_retries - 1:
-                    logger.warning(f"⚠️ Error conectando a PostgreSQL: {e}. Reintentando en {retry_interval}s...")
-                    time.sleep(retry_interval)
-                else:
-                    logger.error(f"❌ No se pudo conectar a PostgreSQL después de {max_retries} intentos")
-                    # No lanzamos excepción, el sistema puede funcionar en modo memoria
-                    logger.info("⚠️ El sistema funcionará en modo memoria hasta que PostgreSQL esté disponible")
-                    return False
-    
-    def get_connection(self):
-        """Obtiene una conexión del pool"""
-        try:
-            if not self.connection_pool:
-                # Intentar reconectar si el pool no existe
-                self.connect_with_retries(max_retries=3, retry_interval=1)
-                if not self.connection_pool:
-                    raise OperationalError("No hay conexión disponible a PostgreSQL")
-            
-            conn = self.connection_pool.getconn()
-            return conn
-            
-        except Exception as e:
-            logger.error(f"❌ Error obteniendo conexión: {e}")
-            raise
-    
-    def return_connection(self, conn):
-        """Devuelve una conexión al pool"""
-        try:
-            if self.connection_pool:
-                self.connection_pool.putconn(conn)
-        except Exception as e:
-            logger.error(f"❌ Error devolviendo conexión: {e}")
-    
-    def init_database(self):
-        """Inicializa la base de datos y crea las tablas si no existen"""
-        if not self.connection_pool:
-            logger.warning("⚠️ No se puede inicializar base de datos: PostgreSQL no disponible")
-            return
-        
-        try:
-            conn = self.get_connection()
-            cursor = conn.cursor()
-            
-            # Crear tabla de puntos de carga
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS charging_points (
-                    cp_id VARCHAR(50) PRIMARY KEY,
-                    location VARCHAR(100) NOT NULL,
-                    price_per_kwh DECIMAL(10, 2) NOT NULL,
-                    status VARCHAR(20) NOT NULL DEFAULT 'DESCONECTADO',
-                    current_consumption DECIMAL(10, 2) DEFAULT 0.0,
-                    current_amount DECIMAL(10, 2) DEFAULT 0.0,
-                    driver_id VARCHAR(50),
-                    last_heartbeat TIMESTAMP,
-                    total_energy_supplied DECIMAL(10, 2) DEFAULT 0.0,
-                    total_revenue DECIMAL(10, 2) DEFAULT 0.0,
-                    registration_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    last_supply_message TIMESTAMP,
-                    supply_ending BOOLEAN DEFAULT FALSE,
-                    supply_ended_time TIMESTAMP,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            
-            # Crear tabla de conductores
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS drivers (
-                    driver_id VARCHAR(50) PRIMARY KEY,
-                    registration_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            
-            # Crear tabla de transacciones
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS transactions (
-                    transaction_id VARCHAR(100) PRIMARY KEY,
-                    cp_id VARCHAR(50) NOT NULL,
-                    driver_id VARCHAR(50),
-                    energy_consumed DECIMAL(10, 2),
-                    amount DECIMAL(10, 2),
-                    price_per_kwh DECIMAL(10, 2),
-                    status VARCHAR(20),
-                    failure_reason TEXT,
-                    start_time TIMESTAMP,
-                    end_time TIMESTAMP,
-                    location VARCHAR(100),
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            
-            # Crear tabla de backups (histórico)
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS backups (
-                    backup_id SERIAL PRIMARY KEY,
-                    backup_type VARCHAR(50) NOT NULL,
-                    description TEXT,
-                    data JSONB NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            
-            # Crear índices
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_cp_status ON charging_points(status)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_transactions_cp_id ON transactions(cp_id)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_transactions_driver_id ON transactions(driver_id)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_backups_created_at ON backups(created_at)")
-            
-            conn.commit()
-            cursor.close()
-            self.return_connection(conn)
-            
-            logger.info("✅ Base de datos PostgreSQL inicializada correctamente")
-            
-        except Exception as e:
-            logger.error(f"❌ Error inicializando base de datos: {e}", exc_info=True)
-    
     def load_data(self):
-        """Carga los datos desde la base de datos PostgreSQL"""
-        if not self.connection_pool:
-            logger.warning("⚠️ No se pueden cargar datos: PostgreSQL no disponible")
-            return False
-            
+        """Carga los datos desde el archivo JSON o backup más reciente"""
         try:
-            logger.info("📁 Cargando datos desde PostgreSQL...")
+            # Intentar cargar el archivo principal
+            if os.path.exists(self.data_file):
+                logger.info(f"📁 Intentando cargar datos desde {self.data_file}")
+                data = self._load_json_file(self.data_file)
+                if data is not None:
+                    self._process_loaded_data(data)
+                    logger.info(f"✅ Datos cargados desde {self.data_file}: {len(self.charging_points)} CPs, {len(self.drivers)} conductores")
+                    return True
             
-            conn = self.get_connection()
-            cursor = conn.cursor(cursor_factory=extras.RealDictCursor)
+            # Si no buscar backups
+            logger.info("🔍 Buscando backups disponibles...")
+            backup_file = self._find_latest_backup()
+            if backup_file:
+                logger.info(f"🔄 Cargando desde backup: {backup_file}")
+                backup_data = self._load_json_file(backup_file)
+                if backup_data is not None:
+                    self._process_loaded_data(backup_data)
+                    # Backup como archivo principal
+                    self._restore_from_backup(backup_file)
+                    logger.info(f"✅ Datos cargados desde backup: {backup_file}")
+                    return True
             
-            # Cargar puntos de carga
-            cursor.execute("SELECT * FROM charging_points")
-            charging_points_data = cursor.fetchall()
-            
-            self.charging_points.clear()
-            for cp_data in charging_points_data:
-                try:
-                    cp_dict = dict(cp_data)
-                    # Convertir tipos especiales
-                    cp_dict['last_heartbeat'] = cp_data['last_heartbeat'].isoformat() if cp_data['last_heartbeat'] else None
-                    cp_dict['last_supply_message'] = cp_data['last_supply_message'].isoformat() if cp_data['last_supply_message'] else None
-                    cp_dict['supply_ended_time'] = cp_data['supply_ended_time'].isoformat() if cp_data['supply_ended_time'] else None
-                    cp_dict['registration_date'] = cp_data['registration_date'].isoformat() if cp_data['registration_date'] else datetime.now().isoformat()
-                    
-                    cp = ChargingPoint.unparse(cp_dict)
-                    self.charging_points[cp.cp_id] = cp
-                except Exception as e:
-                    logger.error(f"❌ Error cargando CP {cp_data.get('cp_id', 'desconocido')}: {e}")
-            
-            # Cargar conductores
-            cursor.execute("SELECT driver_id FROM drivers")
-            drivers_data = cursor.fetchall()
-            self.drivers = set(driver['driver_id'] for driver in drivers_data)
-            
-            # Cargar transacciones (solo para estadísticas, no para memoria)
-            cursor.execute("SELECT COUNT(*) as count FROM transactions")
-            transaction_count = cursor.fetchone()['count']
-            self.transactions = []  # No cargamos todas las transacciones en memoria
-            
-            cursor.close()
-            self.return_connection(conn)
-            
-            logger.info(f"✅ Datos cargados desde PostgreSQL: {len(self.charging_points)} CPs, {len(self.drivers)} conductores, {transaction_count} transacciones")
-            return True
+            # No hay datos existentes
+            logger.info("📭 No se encontraron datos existentes ni backups. Sistema iniciado sin datos.")
+            return False
                     
         except Exception as e:
-            logger.error(f"❌ Error cargando datos desde PostgreSQL: {e}", exc_info=True)
+            logger.error(f"❌ Error cargando datos: {e}", exc_info=True)
             return False
-    
-    def save_charging_point(self, cp: ChargingPoint) -> bool:
-        """Guarda un punto de carga en la base de datos"""
-        if not self.connection_pool:
-            logger.warning(f"⚠️ No se puede guardar CP {cp.cp_id}: PostgreSQL no disponible")
-            return False
-            
+
+    def _load_json_file(self, file_path: str) -> Optional[dict]:
+        """Carga un archivo JSON de forma segura"""
         try:
-            conn = self.get_connection()
-            cursor = conn.cursor()
+            with open(file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
             
-            # Verificar si existe
-            cursor.execute("SELECT cp_id FROM charging_points WHERE cp_id = %s", (cp.cp_id,))
-            exists = cursor.fetchone() is not None
+            # Validar estructura básica
+            if not isinstance(data, dict):
+                logger.error(f"❌ Estructura inválida en {file_path}")
+                return None
+                
+            return data
             
-            if exists:
-                # Actualizar
-                cursor.execute("""
-                    UPDATE charging_points SET
-                        location = %s,
-                        price_per_kwh = %s,
-                        status = %s,
-                        current_consumption = %s,
-                        current_amount = %s,
-                        driver_id = %s,
-                        last_heartbeat = %s,
-                        total_energy_supplied = %s,
-                        total_revenue = %s,
-                        last_supply_message = %s,
-                        supply_ending = %s,
-                        supply_ended_time = %s,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE cp_id = %s
-                """, (
-                    cp.location, cp.price_per_kwh, cp.status,
-                    cp.current_consumption, cp.current_amount,
-                    cp.driver_id, cp.last_heartbeat,
-                    cp.total_energy_supplied, cp.total_revenue,
-                    cp.last_supply_message, cp.supply_ending,
-                    cp.supply_ended_time, cp.cp_id
-                ))
-            else:
-                # Insertar nuevo
-                cursor.execute("""
-                    INSERT INTO charging_points (
-                        cp_id, location, price_per_kwh, status,
-                        current_consumption, current_amount, driver_id,
-                        last_heartbeat, total_energy_supplied, total_revenue,
-                        registration_date, last_supply_message, supply_ending,
-                        supply_ended_time
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """, (
-                    cp.cp_id, cp.location, cp.price_per_kwh, cp.status,
-                    cp.current_consumption, cp.current_amount, cp.driver_id,
-                    cp.last_heartbeat, cp.total_energy_supplied, cp.total_revenue,
-                    cp.registration_date, cp.last_supply_message, cp.supply_ending,
-                    cp.supply_ended_time
-                ))
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ JSON corrupto en {file_path}: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"❌ Error leyendo {file_path}: {e}")
+            return None
+
+    def _process_loaded_data(self, data: dict):
+        """Procesa los datos cargados del JSON"""
+        # Cargar puntos de carga
+        self.charging_points.clear()
+        for cp_data in data.get('charging_points', []):
+            try:
+                cp = ChargingPoint.unparse(cp_data)
+                self.charging_points[cp.cp_id] = cp
+            except Exception as e:
+                logger.error(f"❌ Error cargando CP {cp_data.get('cp_id', 'desconocido')}: {e}")
+        
+        # Cargar conductores
+        self.drivers = set(data.get('drivers', []))
+        
+        # Cargar transacciones
+        self.transactions = data.get('transactions', [])
+        
+        logger.info(f"📊 Datos procesados: {len(self.charging_points)} CPs, {len(self.drivers)} conductores, {len(self.transactions)} transacciones")
+
+    def _find_latest_backup(self) -> Optional[str]:
+        """Encuentra el backup más reciente"""
+        try:
+            backup_dir = os.getenv('BACKUP_DIR', '/app/backups')
+            if not os.path.exists(backup_dir):
+                logger.warning(f"📁 Directorio de backups no encontrado: {backup_dir}")
+                return None
             
-            conn.commit()
-            cursor.close()
-            self.return_connection(conn)
+            # Buscar archivos de backup
+            backup_files = []
+            for filename in os.listdir(backup_dir):
+                if filename.startswith('ev_central_backup_') and filename.endswith('.json'):
+                    file_path = os.path.join(backup_dir, filename)
+                    if os.path.isfile(file_path):
+                        backup_files.append(file_path)
             
-            logger.debug(f"💾 CP {cp.cp_id} guardado en PostgreSQL")
-            return True
+            if not backup_files:
+                logger.info("📁 No se encontraron archivos de backup")
+                return None
+            
+            # Ordenar por fecha de modificación
+            backup_files.sort(key=os.path.getmtime, reverse=True)
+            latest_backup = backup_files[0]
+            
+            logger.info(f"📦 Backup más reciente encontrado: {latest_backup}")
+            return latest_backup
             
         except Exception as e:
-            logger.error(f"❌ Error guardando CP {cp.cp_id}: {e}")
-            return False
+            logger.error(f"❌ Error buscando backups: {e}")
+            return None
+
+    def _restore_from_backup(self, backup_file: str):
+        """Restaura el archivo principal desde un backup"""
+        try:
+            import shutil
+            shutil.copy2(backup_file, self.data_file)
+            logger.info(f"🔄 Backup restaurado como archivo principal: {backup_file} -> {self.data_file}")
+        except Exception as e:
+            logger.error(f"❌ Error restaurando backup: {e}")
     
     def save_data(self):
-        """Guarda todos los datos en la base de datos"""
-        if not self.connection_pool:
-            logger.warning("⚠️ No se pueden guardar datos: PostgreSQL no disponible")
-            return
-            
+        """Guarda los datos en el archivo JSON"""
         try:
-            logger.debug("💾 Guardando datos en PostgreSQL...")
+            data = {
+                'charging_points': [],
+                'drivers': list(self.drivers),
+                'transactions': self.transactions,
+                'last_save': datetime.now().isoformat()
+            }
             
-            # Guardar todos los puntos de carga
-            saved_count = 0
             for cp in self.charging_points.values():
-                if self.save_charging_point(cp):
-                    saved_count += 1
+                cp_data = cp.parse()
+                data['charging_points'].append(cp_data)
             
-            # Guardar conductores
-            conn = self.get_connection()
-            cursor = conn.cursor()
+            with open(self.data_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
             
-            for driver_id in self.drivers:
-                cursor.execute("""
-                    INSERT INTO drivers (driver_id) 
-                    VALUES (%s) 
-                    ON CONFLICT (driver_id) DO NOTHING
-                """, (driver_id,))
-            
-            conn.commit()
-            cursor.close()
-            self.return_connection(conn)
-            
-            logger.info(f"💾 Datos guardados en PostgreSQL: {saved_count}/{len(self.charging_points)} CPs, {len(self.drivers)} conductores")
+            logger.info(f"💾 Datos guardados en {self.data_file}")
             
         except Exception as e:
-            logger.error(f"❌ Error guardando datos en PostgreSQL: {e}", exc_info=True)
+            logger.error(f"❌ Error guardando datos: {e}", exc_info=True)
     
     def add_charging_point(self, cp: ChargingPoint) -> bool:
         """Añade un punto de carga Y guarda automáticamente"""
@@ -466,7 +284,7 @@ class DatabaseManager:
             if existing_cp.status == "DESCONECTADO":
                 logger.info(f"🔄 Reemplazando CP {cp.cp_id} en estado DESCONECTADO")
                 self.charging_points[cp.cp_id] = cp
-                self.save_charging_point(cp)
+                self.save_data()
                 return True
             else:
                 # NO permitir cualquier otro estado
@@ -477,7 +295,7 @@ class DatabaseManager:
         # Si no existe o está DESCONECTADO entonces añadir 
         self.charging_points[cp.cp_id] = cp
         logger.info(f"➕ Punto de carga {cp.cp_id} registrado - Ubicación: {cp.location}, Precio: €{cp.price_per_kwh}/kWh")
-        self.save_charging_point(cp)
+        self.save_data()
         return True
 
     def get_charging_point(self, cp_id: str) -> Optional[ChargingPoint]:
@@ -490,60 +308,19 @@ class DatabaseManager:
         """Registra un conductor Y guarda automáticamente"""
         self.drivers.add(driver_id)
         logger.info(f"👤 Conductor {driver_id} registrado")
-        
-        if not self.connection_pool:
-            logger.warning(f"⚠️ No se puede guardar conductor {driver_id}: PostgreSQL no disponible")
-            return
-            
-        try:
-            conn = self.get_connection()
-            cursor = conn.cursor()
-            cursor.execute("""
-                INSERT INTO drivers (driver_id) 
-                VALUES (%s) 
-                ON CONFLICT (driver_id) DO NOTHING
-            """, (driver_id,))
-            conn.commit()
-            cursor.close()
-            self.return_connection(conn)
-        except Exception as e:
-            logger.error(f"❌ Error registrando conductor {driver_id} en BD: {e}")
+        self.save_data()
     
     def add_transaction(self, transaction_data: dict):
-        """Añade una transacción al historial en PostgreSQL"""
-        if not self.connection_pool:
-            logger.warning(f"⚠️ No se puede guardar transacción: PostgreSQL no disponible")
-            return False
-            
+        """Añade una transacción al historial """
         try:
-            conn = self.get_connection()
-            cursor = conn.cursor()
+            # Verificar duplicados por transaction_id
+            existing_ids = {t.get('transaction_id') for t in self.transactions}
+            if transaction_data.get('transaction_id') in existing_ids:
+                logger.warning(f"⚠️ Transacción duplicada detectada: {transaction_data.get('transaction_id')}")
+                return False
             
-            cursor.execute("""
-                INSERT INTO transactions (
-                    transaction_id, cp_id, driver_id, energy_consumed,
-                    amount, price_per_kwh, status, failure_reason,
-                    start_time, end_time, location
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (transaction_id) DO NOTHING
-            """, (
-                transaction_data.get('transaction_id'),
-                transaction_data.get('cp_id'),
-                transaction_data.get('driver_id'),
-                transaction_data.get('energy_consumed'),
-                transaction_data.get('amount'),
-                transaction_data.get('price_per_kwh'),
-                transaction_data.get('status'),
-                transaction_data.get('failure_reason'),
-                transaction_data.get('start_time'),
-                transaction_data.get('end_time'),
-                transaction_data.get('location')
-            ))
-            
-            conn.commit()
-            cursor.close()
-            self.return_connection(conn)
-            
+            transaction_data['timestamp'] = datetime.now().isoformat()
+            self.transactions.append(transaction_data)
             logger.debug(f"📝 Transacción añadida: {transaction_data.get('transaction_id')}")
             return True
             
@@ -551,134 +328,24 @@ class DatabaseManager:
             logger.error(f"❌ Error añadiendo transacción: {e}")
             return False
     
-    def backup_data(self, backup_type: str = "automatic", description: str = None):
-        """Crea una copia de seguridad de los datos en PostgreSQL"""
-        if not self.connection_pool:
-            logger.warning("⚠️ No se puede crear backup: PostgreSQL no disponible")
-            return False
-            
+    def backup_data(self, backup_file: str = None):
+        """Crea una copia de seguridad de los datos"""
+        if backup_file is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_dir = os.getenv('BACKUP_DIR', '/app/backups')
+            if not os.path.exists(backup_dir):
+                os.makedirs(backup_dir)
+            backup_file = os.path.join(backup_dir, f"ev_central_backup_{timestamp}.json")
+        
         try:
-            logger.info("📦 Creando backup en PostgreSQL...")
-            
-            # Preparar datos para el backup
-            backup_data = {
-                'charging_points': [cp.parse() for cp in self.charging_points.values()],
-                'drivers': list(self.drivers),
-                'timestamp': datetime.now().isoformat(),
-                'backup_type': backup_type
-            }
-            
-            if description:
-                backup_data['description'] = description
-            
-            conn = self.get_connection()
-            cursor = conn.cursor()
-            
-            # Insertar backup
-            cursor.execute("""
-                INSERT INTO backups (backup_type, description, data)
-                VALUES (%s, %s, %s)
-            """, (
-                backup_type,
-                description or f"Backup {backup_type} - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-                json.dumps(backup_data, ensure_ascii=False)
-            ))
-            
-            conn.commit()
-            cursor.close()
-            self.return_connection(conn)
-            
-            logger.info(f"✅ Backup creado en PostgreSQL - Tipo: {backup_type}")
+            self.save_data()
+            import shutil
+            shutil.copy2(self.data_file, backup_file)
+            logger.info(f"📦 Copia de seguridad creada: {backup_file}")
             return True
-            
         except Exception as e:
-            logger.error(f"❌ Error creando backup en PostgreSQL: {e}", exc_info=True)
+            logger.error(f"❌ Error creando copia de seguridad: {e}", exc_info=True)
             return False
-    
-    def restore_from_backup(self, backup_id: int = None):
-        """Restaura datos desde un backup específico o el más reciente"""
-        if not self.connection_pool:
-            logger.warning("⚠️ No se puede restaurar backup: PostgreSQL no disponible")
-            return False
-            
-        try:
-            conn = self.get_connection()
-            cursor = conn.cursor(cursor_factory=extras.RealDictCursor)
-            
-            if backup_id:
-                cursor.execute("SELECT * FROM backups WHERE backup_id = %s", (backup_id,))
-            else:
-                cursor.execute("SELECT * FROM backups ORDER BY created_at DESC LIMIT 1")
-            
-            backup = cursor.fetchone()
-            
-            if not backup:
-                logger.warning("📭 No se encontraron backups disponibles")
-                return False
-            
-            logger.info(f"🔄 Restaurando desde backup ID {backup['backup_id']} - {backup['backup_type']}")
-            
-            backup_data = backup['data']
-            
-            # Limpiar datos actuales en memoria
-            self.charging_points.clear()
-            self.drivers.clear()
-            
-            # Restaurar puntos de carga
-            for cp_data in backup_data.get('charging_points', []):
-                try:
-                    cp = ChargingPoint.unparse(cp_data)
-                    self.charging_points[cp.cp_id] = cp
-                    self.save_charging_point(cp)
-                except Exception as e:
-                    logger.error(f"❌ Error restaurando CP {cp_data.get('cp_id', 'desconocido')}: {e}")
-            
-            # Restaurar conductores
-            for driver_id in backup_data.get('drivers', []):
-                self.drivers.add(driver_id)
-                cursor.execute("""
-                    INSERT INTO drivers (driver_id) 
-                    VALUES (%s) 
-                    ON CONFLICT (driver_id) DO NOTHING
-                """, (driver_id,))
-            
-            conn.commit()
-            cursor.close()
-            self.return_connection(conn)
-            
-            logger.info(f"✅ Datos restaurados desde backup - {len(self.charging_points)} CPs, {len(self.drivers)} conductores")
-            return True
-            
-        except Exception as e:
-            logger.error(f"❌ Error restaurando desde backup: {e}", exc_info=True)
-            return False
-    
-    def get_backup_list(self):
-        """Obtiene lista de backups disponibles"""
-        if not self.connection_pool:
-            logger.warning("⚠️ No se pueden listar backups: PostgreSQL no disponible")
-            return []
-            
-        try:
-            conn = self.get_connection()
-            cursor = conn.cursor(cursor_factory=extras.RealDictCursor)
-            
-            cursor.execute("""
-                SELECT backup_id, backup_type, description, created_at
-                FROM backups 
-                ORDER BY created_at DESC
-                LIMIT 20
-            """)
-            
-            backups = cursor.fetchall()
-            cursor.close()
-            self.return_connection(conn)
-            
-            return backups
-            
-        except Exception as e:
-            logger.error(f"❌ Error obteniendo lista de backups: {e}")
-            return []
 
 import json
 from kafka import KafkaProducer, KafkaConsumer
@@ -897,7 +564,7 @@ class SocketServer:
                 existing_cp.status = "ACTIVADO"  # ACTIVADO al reconectar
                 
                 # Guardar cambios
-                self.central.database.save_charging_point(existing_cp)
+                self.central.database.save_data()
                 
                 # REGISTER_OK
                 response = "REGISTER_OK"
@@ -1009,11 +676,10 @@ class SocketServer:
             client_socket.send(response.encode('utf-8'))
 
 class EVCentral:
-    """Clase principal del sistema central con persistencia en PostgreSQL"""
+    """Clase principal del sistema central con persistencia"""
     
-    def __init__(self, socket_host: str, socket_port: int, kafka_servers: str):
-        # Ahora DatabaseManager no necesita data_file
-        self.database = DatabaseManager()
+    def __init__(self, socket_host: str, socket_port: int, kafka_servers: str, data_file: str = None):
+        self.database = DatabaseManager(data_file)
         
         # Usar Kafka REAL en lugar del simulado
         self.kafka_manager = RealKafkaManager(kafka_servers)
@@ -1044,8 +710,8 @@ class EVCentral:
             self.kafka_manager.close()
         
         self.database.save_data()
-        logger.info("💾 Datos guardados correctamente en PostgreSQL")
-        self.database.backup_data("shutdown", "Backup antes del apagado")
+        logger.info("💾 Datos guardados correctamente")
+        self.database.backup_data()
         logger.info("✅ EV_Central apagado correctamente")
         sys.exit(0)
 
@@ -1301,11 +967,9 @@ class EVCentral:
         print("  stats          - Mostrar estadísticas")
         print("  save           - Guardar datos manualmente")
         print("  backup         - Crear copia de seguridad")
-        print("  backups        - Listar backups disponibles")
-        print("  restore        - Restaurar último backup")
         print("  quit           - Salir")
         print("="*110)
-    
+
     def handle_console_input(self):
         """Maneja la entrada por consola"""
         while self.running:
@@ -1320,17 +984,10 @@ class EVCentral:
                     self.database.save_data()
                     print("✅ Datos guardados manualmente")
                 elif command == 'backup':
-                    if self.database.backup_data("manual", "Backup manual desde consola"):
+                    if self.database.backup_data():
                         print("✅ Copia de seguridad creada")
                     else:
                         print("❌ Error creando copia de seguridad")
-                elif command == 'backups':
-                    self.show_backup_list()
-                elif command == 'restore':
-                    if self.database.restore_from_backup():
-                        print("✅ Sistema restaurado desde backup")
-                    else:
-                        print("❌ Error restaurando desde backup")
                 elif command == 'stats':
                     self.show_statistics()
                 elif command.startswith('stop '):
@@ -1340,7 +997,7 @@ class EVCentral:
                     cp_id = command[7:].strip().upper()
                     self.send_control_command(cp_id, "RESUME")
                 else:
-                    print("❌ Comando no reconocido. Use 'stop <cp_id>', 'resume <cp_id>', 'status', 'stats', 'save', 'backup', 'backups', 'restore' o 'quit'")
+                    print("❌ Comando no reconocido. Use 'stop <cp_id>', 'resume <cp_id>', 'status', 'stats', 'save', 'backup' o 'quit'")
                     
             except Exception as e:
                 logger.error(f"❌ Error procesando comando: {e}", exc_info=True)
@@ -1367,40 +1024,13 @@ class EVCentral:
         print(f"Transacciones registradas: {len(self.database.transactions)}")
         print("="*50)
     
-    def show_backup_list(self):
-        """Muestra la lista de backups disponibles"""
-        backups = self.database.get_backup_list()
-        
-        if not backups:
-            print("📭 No hay backups disponibles")
-            return
-        
-        print("\n" + "="*80)
-        print("BACKUPS DISPONIBLES")
-        print("="*80)
-        print(f"{'ID':<8} {'Tipo':<12} {'Fecha':<20} {'Descripción'}")
-        print("-"*80)
-        
-        for backup in backups:
-            backup_id = backup['backup_id']
-            backup_type = backup['backup_type']
-            created_at = backup['created_at'].strftime('%Y-%m-%d %H:%M:%S')
-            description = backup.get('description', 'Sin descripción')
-            
-            print(f"{backup_id:<8} {backup_type:<12} {created_at:<20} {description}")
-        
-        print("="*80)
-        print("Para restaurar un backup específico: restore <backup_id>")
-        print("Para restaurar el último backup: restore")
-        print("="*80)
-    
     def auto_save(self):
         """Guarda los datos automáticamente cada cierto tiempo"""
         while self.running:
             time.sleep(self.auto_save_interval)
             try:
                 self.database.save_data()
-                logger.debug("💾 Guardado automático realizado en PostgreSQL")
+                logger.debug("💾 Guardado automático realizado")
             except Exception as e:
                 logger.error(f"❌ Error en guardado automático: {e}", exc_info=True)
     
@@ -1488,7 +1118,7 @@ class EVCentral:
         
         # Guardar los cambios en base de datos
         logger.info(f"🔍 Guardando cambios en base de datos...")
-        self.database.save_charging_point(cp)
+        self.database.save_data()
         
         # Enviar actualización via Kafka
         logger.info(f"🔍 Enviando actualización via Kafka...")
@@ -1630,7 +1260,7 @@ class EVCentral:
         except Exception as e:
             logger.error(f"❌ Error enviando notificación de fallo a conductor {driver_id}: {e}")
 
-    def send_failure_notification_to_engine(self, cp_id: str, failure_reason: str, transaction_data: dict):
+    def send_failure_notification_to_engine(self, cp_id: str, failure_reason: str, transaction_data: dict): ##
         """Notifica al Engine sobre una avería durante el suministro"""
         try:
             failure_message = {
@@ -1924,7 +1554,7 @@ class EVCentral:
             
         except Exception as e:
             logger.error(f"❌ Error procesando mensaje de suministro: {e}")
-            
+
     def send_flow_update_to_driver(self, driver_id: str, cp_id: str, flow_rate: float, energy_delivered: float, current_amount: float, total_amount: float = None, location: str = None, price_per_kwh: float = None, timestamp: str = None):
         """Envía actualizaciones de caudal al conductor """
         try:
@@ -2037,7 +1667,7 @@ class EVCentral:
         except Exception as e:
             logger.error(f"❌ Error enviando cancelación: {e}")
     
-    def send_cancellation_ticket(self, cp_id: str, transaction_data: dict, reason: str):
+    def send_cancellation_ticket(self, cp_id: str, transaction_data: dict, reason: str): ##
         """Envía ticket de cancelación al driver"""
         try:
             cancellation_ticket = {
@@ -2181,27 +1811,29 @@ def main():
     # Configuración param
     socket_host = os.getenv('SOCKET_HOST', '0.0.0.0')
     socket_port = int(os.getenv('SOCKET_PORT', '5000'))
-    kafka_servers = os.getenv('KAFKA_SERVERS', 'kafka:9092')
+    kafka_servers = os.getenv('KAFKA_SERVERS', 'localhost:9092')
+    data_file = os.getenv('DATA_FILE', None)
     
     if len(sys.argv) > 1:
         socket_port = int(sys.argv[1])
     if len(sys.argv) > 2:
         kafka_servers = sys.argv[2]
+    if len(sys.argv) > 3:
+        data_file = sys.argv[3]
     
     print("=" * 60)
     print("EV_Central - Sistema de Gestión de Carga EV")
     print("Curso 25/26 - Sistemas Distribuidos")
-    print("CON PERSISTENCIA EN POSTGRESQL - VERSIÓN COMPLETA")
+    print("CON PERSISTENCIA DE DATOS - VERSIÓN COMPLETA")
     print("=" * 60)
     print(f"Socket: {socket_host}:{socket_port}")
     print(f"Kafka: {kafka_servers} (REAL)")
-    print(f"PostgreSQL: {os.getenv('DB_HOST', 'postgres')}:{os.getenv('DB_PORT', '5432')}/{os.getenv('DB_NAME', 'ev_db')}")
+    print(f"Archivo de datos: {data_file or 'valor por defecto'}")
     print(f"Directorio de logs: {os.getenv('LOG_DIR', '/app/logs')}")
     print("=" * 60)
     
     try:
-        # Ahora EVCentral no necesita el parámetro data_file
-        central = EVCentral(socket_host, socket_port, kafka_servers)
+        central = EVCentral(socket_host, socket_port, kafka_servers, data_file)
         central.start()
         
     except Exception as e:

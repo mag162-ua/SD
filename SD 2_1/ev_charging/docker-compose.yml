@@ -1,5 +1,9 @@
+version: '3.8'
 
 services:
+  # ======================================================================
+  # SERVICIOS DE KAFKA
+  # ======================================================================
   zookeeper:
     image: confluentinc/cp-zookeeper:7.4.0
     environment:
@@ -17,13 +21,13 @@ services:
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://172.20.10.12:29092,
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://172.20.10.12:29092
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
     ports:
-      - "9092:9092"   # Para conexiones internas
-      - "29092:29092" # Para conexiones externas
+      - "9092:9092"
+      - "29092:29092"
     networks:
       - kafka-network
     healthcheck:
@@ -56,31 +60,57 @@ services:
     networks:
       - kafka-network
 
-# =========================================================
-  # NUEVO SERVICIO: EV_Registry (PC3 en la Guía de Despliegue)
-  # =========================================================
-  registry:
-    build: ./registry # Asume que el Dockerfile y el código están en la carpeta './registry'
+  # ======================================================================
+  # 3. SERVIDOR POSTGRESQL (Base de Datos Distribuida) - AÑADIDO
+  # ======================================================================
+  postgres:
+    image: postgres:15-alpine
+    container_name: ev_charging-postgres
+    environment:
+      POSTGRES_DB: ev_db
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
     ports:
-      - "8081:8080" # Mapea el puerto 5000 interno a 5001 del host para evitar conflicto con 'central'
+      - "5432:5432"
+    volumes:
+      # Bind Mount: Usa la carpeta local './db' para persistencia
+      - ./db:/var/lib/postgresql/data 
+    networks:
+      - kafka-network # <--- ¡CRÍTICO para la comunicación!
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ======================================================================
+  # 4. SERVICIO DE REGISTRY (Cliente SQL)
+  # ======================================================================
+  registry:
+    build: ./registry
+    ports:
+      - "8081:8080"
+    environment:
+      - DB_HOST=postgres       
+      - DB_NAME=ev_db
+      - DB_USER=user
+      - DB_PASSWORD=password
+    depends_on:
+      postgres:
+        condition: service_healthy
     networks:
       - kafka-network
-    environment:
-      # CRÍTICO: Dirección del Servicio que gestiona el archivo JSON de la BD.
-      # Esta IP debe ser la REAL de la Máquina B donde se ejecuta el Data Store Service
-      - DB_SERVICE_URL="http://192.168.1.50:8090/api/data" 
-      - LANG=C.UTF-8
-      - LC_ALL=C.UTF-8
     command: ["tail", "-f", "/dev/null"]
-  
-  # =========================================================
 
+  # ======================================================================
+  # 5. RESTO DE SERVICIOS
+  # ======================================================================
   cp_engine:
     build: ./cp_engine
     depends_on:
       kafka:
         condition: service_healthy
-    command: ["tail", "-f", "/dev/null"]
     networks:
       - kafka-network
     ports:
@@ -90,27 +120,26 @@ services:
       - LC_ALL=C.UTF-8
     volumes:
       - ./engine_status:/app/estado_engine
+    command: ["tail", "-f", "/dev/null"]
 
   cp_monitor:
     build: ./cp_monitor
     depends_on:
       kafka:
         condition: service_healthy
-    command: ["tail", "-f", "/dev/null"]
     networks:
       - kafka-network
     environment:
       - LANG=C.UTF-8
       - LC_ALL=C.UTF-8
-      - REGISTRY_URL=https://registry:8080
-
+      - REGISTRY_URL=https://registry:8080 
+    command: ["tail", "-f", "/dev/null"]
 
   driver:
     build: ./driver
     depends_on:
       kafka:
         condition: service_healthy
-    command: ["tail", "-f", "/dev/null"]
     networks:
       - kafka-network
     environment:
@@ -118,11 +147,14 @@ services:
       - LC_ALL=C.UTF-8
     volumes:
       - ./suministros_driver:/app/suministros_driver
+    command: ["tail", "-f", "/dev/null"]
 
   central:
     build: ./central
     depends_on:
       kafka:
+        condition: service_healthy
+      postgres:  # <-- AÑADIR DEPENDENCIA DE POSTGRES
         condition: service_healthy
     ports:
       - "5000:5000"
@@ -134,15 +166,25 @@ services:
     environment:
       - SOCKET_HOST=0.0.0.0
       - SOCKET_PORT=5000
-      - KAFKA_SERVERS=localhost:9092
+      # CAMBIAR localhost:9092 por kafka:9092 para conexión dentro de Docker
+      - KAFKA_SERVERS=kafka:9092 
       - LOG_DIR=/app/logs
-      - DATA_FILE=/app/ev_central_data.json
-      - BACKUP_DIR=/app/backups
       - LANG=C.UTF-8
       - LC_ALL=C.UTF-8
+      - DB_HOST=postgres       
+      - DB_NAME=ev_db
+      - DB_USER=user
+      - DB_PASSWORD=password
+    # CAMBIAR PARA EJECUTAR EL SCRIPT AUTOMÁTICAMENTE
     command: ["tail", "-f", "/dev/null"]
+
+# ======================================================================
+# REDES Y VOLÚMENES
+# ======================================================================
 networks:
   kafka-network:
     driver: bridge
 
-
+volumes:
+  # Solo necesitamos un volumen nombrado para Kafka
+  kafka_data: 

@@ -74,7 +74,8 @@ class EV_CP_M:
         registry_endpoint = f"{EV_CP_M.REGISTRY_URL}/register"  
         datos = {
             "id": self.ID,
-            "socket_ip": os.getenv('HOSTNAME'),
+            "location": self.localizacion,
+            "price_per_kwh": self.kwh,
         }
 
         try:
@@ -166,11 +167,13 @@ class EV_CP_M:
                     print(f"Monitor {self.ID} recibió mensaje de la central: {mensaje}")
                     #ERROR#CP_no_registrado#SOLICITAR_REGISTRO#{cp_id}
                     #ERROR_REG = "ERROR#CP_no_registrado#SOLICITAR_REGISTRO"
+                    '''
                     if mensaje == MENSAJES_CP_M.ERROR_REG.value+f"#{self.ID}": # Solicitud de re-registro
                         print(f"Monitor {self.ID} vuelve a registrarse...")
                         if self.dar_de_alta():
+                            print("CP dado de alta correctamente en el Registry.")
                             self.registrarse_central()
-                        
+                    '''
 
                 else: 
                     print("Conexión cerrada por la central.")

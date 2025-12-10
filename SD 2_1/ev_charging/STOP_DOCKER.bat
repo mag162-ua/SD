@@ -1,6 +1,6 @@
 TITLE STOP_DOCKER
 
-docker compose down --remove-orphans
+docker compose down --remove-orphans -v
 docker ps -a
 
 ECHO ===========================================

@@ -1,154 +1,177 @@
+# EV_Registry.py (MODIFICADO PARA USAR POSTGRESQL)
+
 import os
 import secrets
-import requests
 from flask import Flask, request, jsonify
+# Necesario para la conexión a PostgreSQL
+import psycopg2 
+from psycopg2 import sql 
+from psycopg2 import OperationalError
 
 # -------------------------------------------------------------------------
-# CONFIGURACIÓN Y LECTURA DE VARIABLES DE ENTORNO
+# CONFIGURACIÓN DE LA BASE DE DATOS
 # -------------------------------------------------------------------------
+
+# Lee las variables de entorno para la conexión
+DB_HOST = os.environ.get("DB_HOST", "postgres") # Usamos el nombre del servicio Docker
+DB_NAME = os.environ.get("DB_NAME", "ev_db")
+DB_USER = os.environ.get("DB_USER", "user")
+DB_PASSWORD = os.environ.get("DB_PASSWORD", "password")
+DB_PORT = os.environ.get("DB_PORT", "5432")
+
 app = Flask(__name__)
 
-# CRÍTICO: La URL del servicio remoto que gestiona el archivo JSON.
-# Se lee de la variable de entorno establecida en docker-compose.yml.
-# Ejemplo de valor esperado (Máquina B): "http://192.168.1.50:8090/api/data"
-DB_SERVICE_URL = os.getenv("DB_SERVICE_URL")
-
-if not DB_SERVICE_URL:
-    # Mensaje de error si la variable no se configuró correctamente en docker-compose
-    print("[FATAL] ERROR: La variable de entorno DB_SERVICE_URL no está configurada.")
-    exit(1)
-
 # -------------------------------------------------------------------------
-# FUNCIONES AUXILIARES (ACCESO A LA BD REMOTA)
+# FUNCIONES DE CONEXIÓN Y SETUP DE SQL
 # -------------------------------------------------------------------------
 
-def load_db():
-    """
-    Lee el contenido completo del JSON de la Base de Datos Remota mediante GET.
-    """
+def connect_db():
+    """Establece y devuelve la conexión a la base de datos."""
     try:
-        # Petición GET a la URL configurada
-        response = requests.get(DB_SERVICE_URL)
-        response.raise_for_status() # Lanza HTTPError para códigos 4xx/5xx
-        
-        # Devuelve el JSON deserializado (diccionario Python)
-        return response.json()
-        
-    except requests.exceptions.RequestException as e:
-        # En caso de fallo de conexión o error HTTP
-        print(f"[!] ERROR: Falló la conexión a la BD Remota ({DB_SERVICE_URL}). Detalles: {e}")
-        # Retorna una estructura vacía para evitar fallos catastróficos, aunque 
-        # la operación de registro probablemente fallará después.
-        return {"charging_points": {}}
+        conn = psycopg2.connect(
+            dbname=DB_NAME,
+            user=DB_USER,
+            password=DB_PASSWORD,
+            host=DB_HOST,
+            port=DB_PORT
+        )
+        return conn
+    except OperationalError as e:
+        print(f"[DB ERROR] No se pudo conectar a la base de datos: {e}")
+        return None
 
-def save_db(data):
-    """
-    Guarda (sobrescribe) el diccionario completo en la Base de Datos Remota
-    mediante una petición PUT.
-    """
-    try:
-        # Petición PUT para actualizar el recurso remoto con el nuevo JSON
-        response = requests.put(DB_SERVICE_URL, json=data)
-        response.raise_for_status()
+def create_table_if_not_exists():
+    """Crea la tabla de puntos de carga si no existe."""
+    conn = connect_db()
+    if not conn:
+        return False
         
-        print("[*] Datos guardados remotamente con éxito.")
+    try:
+        with conn: # Usa 'with' para asegurar el commit o rollback
+            with conn.cursor() as cur:
+                # Definición de la tabla para los puntos de carga
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS charging_points (
+                    cp_id VARCHAR(50) PRIMARY KEY,
+                    secret_key VARCHAR(100) NOT NULL,
+                    location VARCHAR(100) NOT NULL,
+                    price_per_kwh DECIMAL(10, 2) NOT NULL,
+                    status VARCHAR(20) NOT NULL DEFAULT 'DESCONECTADO',
+                    current_consumption DECIMAL(10, 2) DEFAULT 0.0,
+                    current_amount DECIMAL(10, 2) DEFAULT 0.0,
+                    driver_id VARCHAR(50),
+                    last_heartbeat TIMESTAMP,
+                    total_energy_supplied DECIMAL(10, 2) DEFAULT 0.0,
+                    total_revenue DECIMAL(10, 2) DEFAULT 0.0,
+                    registration_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_supply_message TIMESTAMP,
+                    supply_ending BOOLEAN DEFAULT FALSE,
+                    supply_ended_time TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """)
+        print("[DB] Tabla 'charging_points' verificada/creada con éxito.")
         return True
-        
-    except requests.exceptions.RequestException as e:
-        print(f"[!] ERROR: No se pudo guardar la BD en el servicio remoto: {e}")
+    except Exception as e:
+        print(f"[DB ERROR] Fallo al crear la tabla: {e}")
         return False
 
+
 # -------------------------------------------------------------------------
-# ENDPOINTS DEL API REST DEL REGISTRY
+# FUNCIONES DE PERSISTENCIA (Sustituyen a load_db y save_db)
+# -------------------------------------------------------------------------
+#from psycopg2 import sql
+# ... otras importaciones ...
+
+from psycopg2 import sql, extras
+# Asegúrate de importar extras si usas fetchone() con diccionario
+
+def register_cp_in_db(cp_id, secret_key, location, price_per_kwh):
+    """
+    Versión compatible con todas las versiones de PostgreSQL.
+    """
+    conn = connect_db()
+    if not conn:
+        print("[DB ERROR] No hay conexión a la base de datos")
+        return None
+
+    try:
+        with conn:
+            with conn.cursor(cursor_factory=extras.RealDictCursor) as cur:
+                # Primero verificar si existe
+                cur.execute("SELECT cp_id FROM charging_points WHERE cp_id = %s", (cp_id,))
+                exists = cur.fetchone() is not None
+                
+                if exists:
+                    # UPDATE si existe
+                    update_query = """
+                        UPDATE charging_points 
+                        SET secret_key = %s, 
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE cp_id = %s
+                        RETURNING *
+                    """
+                    cur.execute(update_query, (secret_key, cp_id))
+                else:
+                    # INSERT si no existe
+                    insert_query = """
+                        INSERT INTO charging_points 
+                        (cp_id, secret_key, location, price_per_kwh)
+                        VALUES (%s, %s, %s, %s)
+                        RETURNING *
+                    """
+                    cur.execute(insert_query, (cp_id, secret_key, location, price_per_kwh))
+                
+                result = cur.fetchone()
+                return result
+                
+    except Exception as e:
+        print(f"[DB ERROR] Fallo al registrar CP {cp_id}: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+        
+# Nota: Si Central necesita obtener la lista completa, implementaría un SELECT *
+# Aquí solo se necesita la función de registro para el endpoint /register
+
+# -------------------------------------------------------------------------
+# ENDPOINTS DE LA API (Flask)
 # -------------------------------------------------------------------------
 
 @app.route('/register', methods=['POST'])
 def register_cp():
-    """
-    ENDPOINT: /register
-    Maneja el alta de un Punto de Carga (CP).
-    Cumple el requisito de NO autenticar al CP, solo registrarlo.
-    """
-    req_data = request.get_json()
+    cp_data = request.get_json()
+    cp_id = cp_data.get('id')
+    location = cp_data.get('location', 'Descaonocida')
+    price_per_kwh = cp_data.get('price_per_kwh', 0.20)
+
+    if not cp_id :
+        return jsonify({"error": "Missing 'id'"}), 400
+
+    secret_key = secrets.token_hex(16)
     
-    if not req_data or 'id' not in req_data:
-        return jsonify({"error": "Faltan datos. Se requiere 'id' y 'socket_ip'."}), 400
+    cp_data_from_db = register_cp_in_db(cp_id, secret_key, location, price_per_kwh)
 
-    cp_id = req_data['id']
-    cp_socket = req_data.get('socket_ip', 'unknown') 
-
-    # --- GENERACIÓN DE CLAVE (Requisito de Seguridad) ---
-    # Genera una clave simétrica única que será la credencial de ese CP
-    # para cifrar mensajes al Central, y que la Central usará para descifrar.
-    secret_key = secrets.token_hex(16) # Clave de 32 caracteres hexadecimales
-
-    # 1. Cargamos el estado actual de la BD remota
-    '''
-    db_data = load_db()
-    
-    # 2. Nos aseguramos de la estructura básica
-    if "charging_points" not in db_data:
-        db_data["charging_points"] = {}
-        
-    # 3. Almacenamos el nuevo CP con su clave secreta
-    db_data["charging_points"][cp_id] = {
-        "socket_ip": cp_socket,
-        "status": "REGISTERED",
-        "secret_key": secret_key 
-    }
-    
-    # 4. Guardamos los cambios de vuelta en el servicio remoto
-    if not save_db(db_data):
-        return jsonify({"error": "Fallo al persistir el registro en la BD remota."}), 500
-    '''
-    print(f"[+] CP Registrado/Actualizado: {cp_id}")
-
-    # 5. Devolvemos la clave al CP
-    return jsonify({
-        "message": "Registro exitoso",
-        "cp_id": cp_id,
-        "secret_key": secret_key 
-    }), 201
-
-
-@app.route('/unregister/<cp_id>', methods=['DELETE'])
-def unregister_cp(cp_id):
-    """
-    ENDPOINT: /unregister/<cp_id>
-    Maneja la baja de un Punto de Carga.
-    """
-    # 1. Cargamos datos de la BD remota
-    db_data = load_db()
-    
-    # 2. Verificamos y eliminamos el CP
-    if "charging_points" in db_data and cp_id in db_data["charging_points"]:
-        del db_data["charging_points"][cp_id]
-        
-        # 3. Guardamos los cambios
-        if not save_db(db_data):
-            return jsonify({"error": "Fallo al persistir la baja en la BD remota."}), 500
-
-        print(f"[-] CP Dado de baja: {cp_id}")
-        return jsonify({"message": f"CP {cp_id} eliminado correctamente"}), 200
+    if cp_data_from_db:
+        # Devuelve TODOS los datos de la fila (incluida la clave secreta)
+        return jsonify(cp_data_from_db), 201
     else:
-        return jsonify({"error": "CP no encontrado o BD no disponible"}), 404
+        # Esto ocurre si register_cp_in_db devolvió None
+        return jsonify({"error": "DB registration failed"}), 500
+
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    """Endpoint simple para verificar que el servicio está vivo."""
-    return jsonify({"status": "EV_Registry Online"}), 200
+    """Endpoint de salud y conexión a la BD."""
+    if create_table_if_not_exists():
+        return jsonify({"status": "Registry OK", "db_status": "Connected"}), 200
+    return jsonify({"status": "Registry OK", "db_status": "DOWN"}), 503
 
-# -------------------------------------------------------------------------
-# ARRANQUE DEL SERVIDOR
-# -------------------------------------------------------------------------
+
 if __name__ == '__main__':
-    # El puerto interno del contenedor. Se mapea a 5001 en el host por Docker Compose.
-    PORT = 8080 
+    # Intentar asegurar que la tabla existe antes de iniciar el servidor
+    create_table_if_not_exists()
     
-    print(f"[*] EV_Registry escuchando en puerto {PORT} (HTTPS)")
-    print(f"[*] Accediendo a BD remota configurada: {DB_SERVICE_URL}")
-
-    # Requisito de Seguridad (Canal Seguro - HTTPS)
-    # 'adhoc' genera un certificado SSL temporal para pruebas en desarrollo.
-    # En producción, se usaría un certificado real (cert.pem, key.pem).
-    app.run(host='0.0.0.0', port=PORT, ssl_context='adhoc', debug=True)
+    # Asume que el Registry necesita certificados (SSL adhoc)
+    app.run(host='0.0.0.0', port=8080, ssl_context='adhoc')
