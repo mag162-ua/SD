@@ -34,7 +34,7 @@
         <div class="row g-4 mb-4">
             <div class="col-md-3">
                 <div class="stat-card border-start border-4 border-primary">
-                    <div class="text-muted small text-uppercase fw-bold">Total Puntos</div>
+                    <div class="text-muted small text-uppercase fw-bold">Total CPs</div>
                     <h2 class="mt-2 mb-0" id="total-cps">0</h2>
                 </div>
             </div>
@@ -60,7 +60,7 @@
 
         <div class="card shadow-sm border-0">
             <div class="card-header bg-white py-3">
-                <h5 class="mb-0 fw-bold text-secondary"><i class="fa-solid fa-list me-2"></i>Estado de Puntos de Carga</h5>
+                <h5 class="mb-0 fw-bold text-secondary"><i class="fa-solid fa-list me-2"></i>Estado de Charging Points</h5>
             </div>
             <div class="card-body p-0">
                 <div class="table-responsive">
@@ -84,6 +84,29 @@
             </div>
         </div>
         
+        <div class="card shadow-sm border-0 mt-4">
+            <div class="card-header bg-white py-3">
+                <h5 class="mb-0 fw-bold text-secondary"><i class="fa-solid fa-users me-2"></i>Base de Datos de Conductores</h5>
+            </div>
+            <div class="card-body p-0">
+                <div class="table-responsive">
+                    <table class="table table-hover align-middle mb-0">
+                        <thead class="bg-light">
+                            <tr>
+                                <th class="ps-4">ID Conductor</th>
+                                <th>Estado Actual</th>
+                                <th>Fecha Registro</th>
+                                <th>Acciones</th>
+                            </tr>
+                        </thead>
+                        <tbody id="drivers-table-body">
+                            <tr><td colspan="4" class="text-center py-4">Cargando conductores...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
         <div class="text-end mt-2 text-muted small">
             Última actualización: <span id="last-update">-</span>
         </div>
@@ -104,6 +127,11 @@
                 try {
                     const data = JSON.parse(event.data);
                     renderData(data);
+                    if (data.notifications && data.notifications.length > 0) {
+                        data.notifications.forEach(notif => {
+                            showToast(notif);
+                        });
+                    }
                     document.getElementById('last-update').innerText = new Date().toLocaleTimeString();
                 } catch (e) {
                     console.error("Error parseando:", e);
@@ -217,6 +245,42 @@
                 tbody.innerHTML += row;
             });
 
+            const drivers = data.drivers || [];
+            const driversBody = document.getElementById('drivers-table-body');
+            driversBody.innerHTML = '';
+
+            if (drivers.length === 0) {
+                driversBody.innerHTML = '<tr><td colspan="4" class="text-center py-4 text-muted">No hay conductores registrados</td></tr>';
+            } else {
+                drivers.forEach(driver => {
+                    // Calculamos si el conductor está cargando actualmente
+                    // Buscando si su ID está en algún CP con estado SUMINISTRANDO
+                    const activeCp = cps.find(cp => cp.driver_id === driver.driver_id && cp.status === 'SUMINISTRANDO');
+                    
+                    let statusBadge = '<span class="badge bg-secondary">Inactivo</span>';
+                    if (activeCp) {
+                        statusBadge = `<span class="badge bg-primary"><i class="fa-solid fa-bolt me-1"></i>Cargando en CP-${activeCp.cp_id}</span>`;
+                    }
+
+                    // Formatear fecha
+                    const regDate = new Date(driver.registration_date).toLocaleString();
+
+                    const row = `
+                        <tr>
+                            <td class="ps-4 fw-bold text-dark">${driver.driver_id}</td>
+                            <td>${statusBadge}</td>
+                            <td class="text-muted small">${regDate}</td>
+                            <td>
+                                <button class="btn btn-sm btn-outline-secondary" disabled title="Gestión no implementada">
+                                    <i class="fa-solid fa-gear"></i>
+                                </button>
+                            </td>
+                        </tr>
+                    `;
+                    driversBody.innerHTML += row;
+                });
+            }
+
             // Actualizar Tarjetas
             document.getElementById('total-cps').innerText = cps.length;
             document.getElementById('active-cps').innerText = activeCount;
@@ -255,7 +319,39 @@
             .catch(err => alert('Error de conexión'));
         }
 
+        function showToast(notif) {
+            const container = document.getElementById('toastContainer');
+
+            // Icono según tipo
+            const icon = notif.type === 'danger' ? '<i class="fa-solid fa-snowflake me-2"></i>' : '<i class="fa-solid fa-sun me-2"></i>';
+
+            const html = `
+                <div class="toast align-items-center text-white bg-${notif.type} border-0 show" role="alert" aria-live="assertive" aria-atomic="true">
+                    <div class="d-flex">
+                        <div class="toast-body">
+                            <strong class="me-auto">${icon} ${notif.title}</strong><br>
+                            <small>${notif.time}</small>
+                            <div class="mt-1">${notif.message}</div>
+                        </div>
+                        <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast" aria-label="Close" onclick="this.parentElement.parentElement.remove()"></button>
+                    </div>
+                </div>
+            `;
+
+            // Insertar y auto-eliminar a los 6 segundos
+            const tempDiv = document.createElement('div');
+            tempDiv.innerHTML = html;
+            const toastEl = tempDiv.firstElementChild;
+            container.appendChild(toastEl);
+
+            setTimeout(() => {
+                if(toastEl) toastEl.remove();
+            }, 8000);
+        }
+
         setupEventSource();
     </script>
+    <div class="toast-container position-fixed bottom-0 end-0 p-3" id="toastContainer" style="z-index: 1100;">
+    </div>
 </body>
 </html>
