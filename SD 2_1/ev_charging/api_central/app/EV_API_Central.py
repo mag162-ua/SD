@@ -25,6 +25,8 @@ DB_PASSWORD = os.getenv("DB_PASSWORD", "password")
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('API_Central')
 
+NOTIFICATIONS = []
+
 # --- KAFKA PRODUCER ---
 producer = None
 try:
@@ -71,6 +73,9 @@ def get_full_status():
         cur.execute("SELECT * FROM charging_points ORDER BY cp_id ASC")
         cps = cur.fetchall()
         
+        cur.execute("SELECT * FROM drivers ORDER BY registration_date DESC")
+        drivers = cur.fetchall()
+
         # 2. Leer últimas Transacciones
         cur.execute("SELECT * FROM transactions ORDER BY created_at DESC LIMIT 10")
         txs = cur.fetchall()
@@ -103,6 +108,7 @@ def get_full_status():
         # Estructura de datos para el Frontend
         data = {
             "charging_points": cps,
+            "drivers": drivers,
             "transactions": txs,
             "general_stats": {
                 "total_energy": total_kwh_global,
@@ -117,7 +123,7 @@ def get_full_status():
     except Exception as e:
         logger.error(f"Error consulta SQL: {e}")
         if conn: conn.close()
-        return {"charging_points": [], "transactions": []}
+        return {"charging_points": [], "transactions": [], "drivers": []}
 
 # --- ENDPOINTS ---
 
@@ -138,12 +144,18 @@ def receive_weather_alert():
     cp_id = data.get('cp_id')
     temp = data.get('temperature')
     city = data.get('city')
-    
+
     logger.warning(f"❄️ ALERTA CLIMÁTICA para {cp_id} en {city}: {temp}ºC")
 
-    # --- MODIFICACIÓN AQUÍ ---
-    # Enviamos 'FAILURE' en lugar de 'STOP'.
-    # Esto indica a la Central que debe marcar el CP como AVERIADO/BROKEN.
+    # 1. Guardar notificación para el Dashboard
+    NOTIFICATIONS.append({
+        "type": "danger",  # Rojo para Bootstrap
+        "title": "❄️ ALERTA DE CLIMA",
+        "message": f"Baja temperatura detectada en {city} ({temp}ºC). CP-{cp_id} detenido.",
+        "time": datetime.now().strftime("%H:%M:%S")
+    })
+
+    # 2. Enviar comando a Kafka (Igual que antes)
     message = {
         'cp_id': cp_id,
         'command': 'FAILURE', 
@@ -152,7 +164,7 @@ def receive_weather_alert():
         'source': 'api_weather',
         'timestamp': datetime.now().isoformat()
     }
-    
+
     if producer:
         try:
             producer.send(TOPIC_COMMANDS, message)
@@ -166,12 +178,18 @@ def receive_weather_alert():
 def receive_weather_clear():
     data = request.get_json()
     cp_id = data.get('cp_id')
-    temp = data.get('temperature')
-    
+
     logger.info(f"☀️ CLIMA RESTABLECIDO para {cp_id}")
 
-    # Enviamos comando RESUME a Central vía Kafka
-    # La Central debe interpretar esto para poner el estado en AVAILABLE
+    # 1. Guardar notificación para el Dashboard
+    NOTIFICATIONS.append({
+        "type": "success", # Verde para Bootstrap
+        "title": "☀️ CLIMA RESTABLECIDO",
+        "message": f"Temperaturas seguras en CP-{cp_id}. Sistema operativo.",
+        "time": datetime.now().strftime("%H:%M:%S")
+    })
+
+    # 2. Enviar comando a Kafka (Igual que antes)
     message = {
         'cp_id': cp_id,
         'command': 'RESUME',
@@ -179,7 +197,7 @@ def receive_weather_clear():
         'source': 'api_weather',
         'timestamp': datetime.now().isoformat()
     }
-    
+
     if producer:
         try:
             producer.send(TOPIC_COMMANDS, message)
@@ -194,11 +212,17 @@ def receive_weather_clear():
 def stream():
     def event_stream():
         while True:
-            # Consultar DB
+            # 1. Consultar DB
             data = get_full_status()
-            # Formato Server-Sent Events
+
+            # 2. Inyectar Notificaciones pendientes (si las hay)
+            if NOTIFICATIONS:
+                data['notifications'] = list(NOTIFICATIONS) # Copiamos la lista
+                NOTIFICATIONS.clear() # Vaciamos el buzón
+
+            # 3. Enviar al Frontend
             yield f"data: {json.dumps(data)}\n\n"
-            time.sleep(2) # Actualizar cada 2 segundos
+            time.sleep(2) 
 
     return Response(stream_with_context(event_stream()), mimetype="text/event-stream")
 
