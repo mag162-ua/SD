@@ -3,124 +3,336 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>EV Charging Command Center</title>
+    <title>EV Command Center</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     
     <style>
-        body { background-color: #f3f4f6; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
-        .navbar { background-color: #111827; }
-        .stat-card { background: white; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); padding: 1.5rem; height: 100%; }
-        .badge-status { padding: 6px 12px; border-radius: 20px; font-size: 0.8rem; font-weight: 600; }
-        .status-active { background-color: #d1fae5; color: #065f46; }
-        .status-charging { background-color: #dbeafe; color: #1e40af; animation: pulse 2s infinite; }
-        .status-error { background-color: #fee2e2; color: #991b1b; }
-        .status-offline { background-color: #f3f4f6; color: #374151; }
-        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.7; } 100% { opacity: 1; } }
+        :root {
+            --bg-body: #f8f9fc;
+            --text-primary: #1e293b;
+            --text-secondary: #64748b;
+            --accent-primary: #3b82f6;
+            --card-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
+            --card-radius: 16px;
+        }
+
+        body {
+            background-color: var(--bg-body);
+            font-family: 'Inter', sans-serif;
+            color: var(--text-primary);
+        }
+
+        /* Navbar Minimalista */
+        .navbar {
+            background: white;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+            padding: 1rem 0;
+        }
+        .navbar-brand {
+            font-weight: 700;
+            font-size: 1.25rem;
+            color: var(--text-primary) !important;
+            letter-spacing: -0.5px;
+        }
+
+        /* Tarjetas (Cards) */
+        .dashboard-card {
+            background: white;
+            border: none;
+            border-radius: var(--card-radius);
+            box-shadow: var(--card-shadow);
+            padding: 1.5rem;
+            height: 100%;
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+        }
+        .dashboard-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.05);
+        }
+        
+        .metric-label {
+            color: var(--text-secondary);
+            font-size: 0.8rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 0.5rem;
+        }
+        .metric-value {
+            font-size: 2.2rem;
+            font-weight: 700;
+            color: var(--text-primary);
+            line-height: 1.2;
+        }
+        .metric-icon {
+            width: 48px;
+            height: 48px;
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.25rem;
+            margin-bottom: 1rem;
+        }
+        
+        /* Variantes de Iconos */
+        .icon-blue { background: #eff6ff; color: #3b82f6; }
+        .icon-green { background: #f0fdf4; color: #22c55e; }
+        .icon-purple { background: #f3e8ff; color: #a855f7; }
+        .icon-orange { background: #fff7ed; color: #f97316; }
+
+        /* Tablas */
+        .table-container {
+            background: white;
+            border-radius: var(--card-radius);
+            box-shadow: var(--card-shadow);
+            overflow: hidden;
+            margin-bottom: 2rem;
+        }
+        .table-header {
+            padding: 1.5rem;
+            border-bottom: 1px solid #f1f5f9;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .table-title {
+            font-weight: 700;
+            font-size: 1.1rem;
+            margin: 0;
+            color: var(--text-primary);
+        }
+        .table {
+            margin-bottom: 0;
+            vertical-align: middle;
+        }
+        .table thead th {
+            background-color: #f8fafc;
+            color: var(--text-secondary);
+            font-weight: 600;
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            border-bottom: 1px solid #e2e8f0;
+            padding: 1rem 1.5rem;
+        }
+        .table tbody td {
+            padding: 1.25rem 1.5rem;
+            border-bottom: 1px solid #f1f5f9;
+            color: var(--text-primary);
+            font-size: 0.95rem;
+        }
+        .table tbody tr:last-child td {
+            border-bottom: none;
+        }
+
+        /* Badges de Estado (Píldoras) */
+        .status-pill {
+            padding: 6px 12px;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .status-pill.active { background: #dcfce7; color: #15803d; }
+        .status-pill.charging { background: #dbeafe; color: #1d4ed8; box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.1); }
+        .status-pill.error { background: #fee2e2; color: #b91c1c; }
+        .status-pill.offline { background: #f1f5f9; color: #64748b; }
+        .status-pill.stopped { background: #ffedd5; color: #9a3412; }
+
+        /* Botones de Acción (Circulares) */
+        .btn-action {
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            border: 1px solid transparent;
+            transition: all 0.2s;
+            margin-right: 4px;
+        }
+        .btn-action.stop { background: #fee2e2; color: #ef4444; }
+        .btn-action.stop:hover:not(:disabled) { background: #ef4444; color: white; }
+        
+        .btn-action.resume { background: #dcfce7; color: #22c55e; }
+        .btn-action.resume:hover:not(:disabled) { background: #22c55e; color: white; }
+
+        .btn-action:disabled { opacity: 0.3; cursor: not-allowed; filter: grayscale(100%); }
+
+        /* Animación pulso para carga */
+        @keyframes pulse-ring {
+            0% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.4); }
+            70% { box-shadow: 0 0 0 6px rgba(59, 130, 246, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0); }
+        }
+        .pulse-active {
+            animation: pulse-ring 2s infinite;
+        }
+
+        /* Utilidades */
+        .text-sub { font-size: 0.85rem; color: var(--text-secondary); }
+        .fw-medium { font-weight: 500; }
+        .avatar-circle {
+            width: 32px; height: 32px; background: #e2e8f0; border-radius: 50%; 
+            display: inline-flex; align-items: center; justify-content: center;
+            font-size: 0.75rem; font-weight: 600; color: #475569; margin-right: 8px;
+        }
     </style>
 </head>
 <body>
 
-    <nav class="navbar navbar-dark mb-4">
+    <nav class="navbar sticky-top">
         <div class="container">
-            <a class="navbar-brand" href="#"><i class="fa-solid fa-charging-station me-2"></i>EV Network Control</a>
-            <div class="text-light">
-                <span id="connection-status" class="badge bg-warning text-dark">Conectando...</span>
+            <a class="navbar-brand d-flex align-items-center" href="#">
+                <div class="bg-dark text-white rounded p-2 me-2 d-flex align-items-center justify-content-center" style="width:36px; height:36px;">
+                    <i class="fa-solid fa-bolt"></i>
+                </div>
+                EV Network <span class="fw-light ms-1">Control</span>
+            </a>
+            <div class="d-flex align-items-center gap-3">
+                <span id="connection-status" class="status-pill offline">
+                    <i class="fa-solid fa-circle"></i> Conectando...
+                </span>
+                <span class="text-sub d-none d-md-block" id="last-update">--:--:--</span>
             </div>
         </div>
     </nav>
 
-    <div class="container">
-        <div class="row g-4 mb-4">
-            <div class="col-md-3">
-                <div class="stat-card border-start border-4 border-primary">
-                    <div class="text-muted small text-uppercase fw-bold">Total CPs</div>
-                    <h2 class="mt-2 mb-0" id="total-cps">0</h2>
-                </div>
-            </div>
-            <div class="col-md-3">
-                <div class="stat-card border-start border-4 border-success">
-                    <div class="text-muted small text-uppercase fw-bold">Activos/Cargando</div>
-                    <h2 class="mt-2 mb-0" id="active-cps">0</h2>
-                </div>
-            </div>
-            <div class="col-md-3">
-                <div class="stat-card border-start border-4 border-info">
-                    <div class="text-muted small text-uppercase fw-bold">Energía Total</div>
-                    <h2 class="mt-2 mb-0" id="total-energy">0 kWh</h2>
-                </div>
-            </div>
-            <div class="col-md-3">
-                <div class="stat-card border-start border-4 border-warning">
-                    <div class="text-muted small text-uppercase fw-bold">Ingresos</div>
-                    <h2 class="mt-2 mb-0" id="total-revenue">0 €</h2>
-                </div>
-            </div>
-        </div>
-
-        <div class="card shadow-sm border-0">
-            <div class="card-header bg-white py-3">
-                <h5 class="mb-0 fw-bold text-secondary"><i class="fa-solid fa-list me-2"></i>Estado de Charging Points</h5>
-            </div>
-            <div class="card-body p-0">
-                <div class="table-responsive">
-                    <table class="table table-hover align-middle mb-0">
-                        <thead class="bg-light">
-                            <tr>
-                                <th class="ps-4">ID / Ubicación</th>
-                                <th>Estado</th>
-                                <th>Conductor</th>
-                                <th>Potencia Actual</th>
-                                <th>Sesión Actual</th>
-                                <th>Total Energía / €</th>
-                                <th>Acciones</th> </tr>
-                            </tr>
-                        </thead>
-                        <tbody id="cp-table-body">
-                            <tr><td colspan="6" class="text-center py-4">Esperando datos de API Central...</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        </div>
+    <div class="container py-5">
         
-        <div class="card shadow-sm border-0 mt-4">
-            <div class="card-header bg-white py-3">
-                <h5 class="mb-0 fw-bold text-secondary"><i class="fa-solid fa-users me-2"></i>Base de Datos de Conductores</h5>
+        <div class="row g-4 mb-5">
+            <div class="col-md-6 col-lg-3">
+                <div class="dashboard-card">
+                    <div class="d-flex justify-content-between align-items-start">
+                        <div>
+                            <div class="metric-label">Puntos Totales</div>
+                            <div class="metric-value" id="total-cps">0</div>
+                        </div>
+                        <div class="metric-icon icon-blue"><i class="fa-solid fa-charging-station"></i></div>
+                    </div>
+                </div>
             </div>
-            <div class="card-body p-0">
-                <div class="table-responsive">
-                    <table class="table table-hover align-middle mb-0">
-                        <thead class="bg-light">
-                            <tr>
-                                <th class="ps-4">ID Conductor</th>
-                                <th>Estado Actual</th>
-                                <th>Fecha Registro</th>
-                                <th>Acciones</th>
-                            </tr>
-                        </thead>
-                        <tbody id="drivers-table-body">
-                            <tr><td colspan="4" class="text-center py-4">Cargando conductores...</td></tr>
-                        </tbody>
-                    </table>
+            <div class="col-md-6 col-lg-3">
+                <div class="dashboard-card">
+                    <div class="d-flex justify-content-between align-items-start">
+                        <div>
+                            <div class="metric-label">Activos / Cargando</div>
+                            <div class="metric-value" id="active-cps">0</div>
+                        </div>
+                        <div class="metric-icon icon-green"><i class="fa-solid fa-bolt"></i></div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6 col-lg-3">
+                <div class="dashboard-card">
+                    <div class="d-flex justify-content-between align-items-start">
+                        <div>
+                            <div class="metric-label">Energía Total</div>
+                            <div class="metric-value" id="total-energy">0 kWh</div>
+                        </div>
+                        <div class="metric-icon icon-purple"><i class="fa-solid fa-plug-circle-bolt"></i></div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6 col-lg-3">
+                <div class="dashboard-card">
+                    <div class="d-flex justify-content-between align-items-start">
+                        <div>
+                            <div class="metric-label">Ingresos Totales</div>
+                            <div class="metric-value" id="total-revenue">0 €</div>
+                        </div>
+                        <div class="metric-icon icon-orange"><i class="fa-solid fa-euro-sign"></i></div>
+                    </div>
                 </div>
             </div>
         </div>
 
-        <div class="text-end mt-2 text-muted small">
-            Última actualización: <span id="last-update">-</span>
+        <div class="table-container">
+            <div class="table-header">
+                <h5 class="table-title">Infraestructura de Carga</h5>
+                <button class="btn btn-sm btn-light text-secondary"><i class="fa-solid fa-filter me-1"></i> Filtros</button>
+            </div>
+            <div class="table-responsive">
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>ID / Ubicación</th>
+                            <th>Estado</th>
+                            <th>Sesión Actual</th>
+                            <th>Potencia</th>
+                            <th>Acumulado</th>
+                            <th class="text-end">Controles</th>
+                        </tr>
+                    </thead>
+                    <tbody id="cp-table-body">
+                        </tbody>
+                </table>
+            </div>
         </div>
+
+        <div class="row">
+            <div class="col-lg-8">
+                <div class="table-container">
+                    <div class="table-header">
+                        <h5 class="table-title">Base de Datos de Conductores</h5>
+                    </div>
+                    <div class="table-responsive">
+                        <table class="table">
+                            <thead>
+                                <tr>
+                                    <th>Conductor</th>
+                                    <th>Estado</th>
+                                    <th>Registro</th>
+                                </tr>
+                            </thead>
+                            <tbody id="drivers-table-body">
+                                </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+            <div class="col-lg-4">
+                <div class="dashboard-card bg-dark text-white" style="background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);">
+                    <h5 class="mb-4">Estado del Sistema</h5>
+                    <div class="d-flex align-items-center mb-3">
+                        <i class="fa-solid fa-server me-3 text-secondary"></i>
+                        <div>
+                            <div class="small text-white-50">API Gateway</div>
+                            <div class="fw-bold text-success">Online</div>
+                        </div>
+                    </div>
+                    <div class="d-flex align-items-center mb-3">
+                        <i class="fa-solid fa-database me-3 text-secondary"></i>
+                        <div>
+                            <div class="small text-white-50">PostgreSQL Database</div>
+                            <div class="fw-bold text-success">Conectado</div>
+                        </div>
+                    </div>
+                    <div class="d-flex align-items-center">
+                        <i class="fa-brands fa-envira me-3 text-secondary"></i>
+                        <div>
+                            <div class="small text-white-50">Kafka Cluster</div>
+                            <div class="fw-bold text-success">Operativo</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
     </div>
 
     <script>
         function setupEventSource() {
-            // Conexión SSE al endpoint nuevo de Python
             const source = new EventSource("/api/stream");
             const statusBadge = document.getElementById('connection-status');
 
             source.onopen = () => {
-                statusBadge.className = 'badge bg-success';
-                statusBadge.innerText = 'En vivo (PostgreSQL)';
+                statusBadge.className = 'status-pill active';
+                statusBadge.innerHTML = '<i class="fa-solid fa-circle"></i> En Vivo';
             };
 
             source.onmessage = (event) => {
@@ -128,9 +340,7 @@
                     const data = JSON.parse(event.data);
                     renderData(data);
                     if (data.notifications && data.notifications.length > 0) {
-                        data.notifications.forEach(notif => {
-                            showToast(notif);
-                        });
+                        data.notifications.forEach(notif => showToast(notif));
                     }
                     document.getElementById('last-update').innerText = new Date().toLocaleTimeString();
                 } catch (e) {
@@ -139,10 +349,9 @@
             };
 
             source.onerror = () => {
-                statusBadge.className = 'badge bg-danger';
-                statusBadge.innerText = 'Desconectado';
+                statusBadge.className = 'status-pill error';
+                statusBadge.innerHTML = '<i class="fa-solid fa-circle"></i> Desconectado';
                 source.close();
-                // Reintentar en 5s
                 setTimeout(setupEventSource, 5000);
             };
         }
@@ -150,7 +359,6 @@
         function renderData(data) {
             const cps = data.charging_points || [];
             
-            // Contadores
             let activeCount = 0;
             let totalEnergy = 0;
             let totalRevenue = 0;
@@ -158,130 +366,114 @@
             const tbody = document.getElementById('cp-table-body');
             tbody.innerHTML = '';
 
-            // Ordenar por ID numéricamente
             cps.sort((a, b) => {
-                // Extraer números del ID (ej: CP-1 -> 1)
                 const numA = parseInt(a.cp_id.replace(/\D/g, '')) || 0;
                 const numB = parseInt(b.cp_id.replace(/\D/g, '')) || 0;
                 return numA - numB;
             });
 
             if (cps.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="7" class="text-center py-4 text-muted">No hay CPs registrados en la Base de Datos</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="6" class="text-center py-5 text-secondary">No hay puntos de carga registrados</td></tr>';
                 return;
             }
 
             cps.forEach(cp => {
-                // Métricas Globales
                 if (cp.status === 'ACTIVADO' || cp.status === 'SUMINISTRANDO') activeCount++;
                 totalEnergy += (cp.total_energy_supplied || 0);
                 totalRevenue += (cp.total_revenue || 0);
 
-                // Iconos y colores de estado
-                let badgeClass = 'status-offline';
-                let icon = '<i class="fa-solid fa-power-off me-1"></i>';
+                // Estilos según estado
+                let pillClass = 'offline';
+                let icon = 'fa-power-off';
+                let rowClass = '';
 
                 if (cp.status === 'ACTIVADO') { 
-                    badgeClass = 'status-active'; 
-                    icon = '<i class="fa-solid fa-check me-1"></i>';
+                    pillClass = 'active'; icon = 'fa-check';
                 } else if (cp.status === 'SUMINISTRANDO') { 
-                    badgeClass = 'status-charging'; 
-                    icon = '<i class="fa-solid fa-bolt me-1"></i>';
+                    pillClass = 'charging pulse-active'; icon = 'fa-bolt';
+                    rowClass = 'bg-light';
                 } else if (cp.status === 'AVERIADO' || cp.status === 'FAILED') { 
-                    badgeClass = 'status-error'; 
-                    icon = '<i class="fa-solid fa-triangle-exclamation me-1"></i>';
+                    pillClass = 'error'; icon = 'fa-triangle-exclamation';
                 } else if (cp.status === 'PARADO') {
-                    badgeClass = 'bg-warning text-dark';
-                    icon = '<i class="fa-solid fa-hand me-1"></i>';
+                    pillClass = 'stopped'; icon = 'fa-hand';
                 }
 
-                // Potencia Actual
-                let powerHtml = '<span class="text-muted">-</span>';
-                if (cp.status === 'SUMINISTRANDO' && cp.current_consumption > 0) {
-                    powerHtml = `<strong>${(cp.current_consumption || 0).toFixed(2)} kW</strong>`;
-                }
+                // Datos dinámicos
+                const powerHtml = (cp.status === 'SUMINISTRANDO' && cp.current_consumption > 0) 
+                    ? `<span class="fw-bold text-primary">${(cp.current_consumption).toFixed(2)} kW</span>` 
+                    : '<span class="text-secondary">-</span>';
 
-                // Sesión Actual
-                let sessionHtml = '<span class="text-muted">-</span>';
-                if (cp.current_amount > 0) {
-                    sessionHtml = `<span class="text-primary fw-bold">€${(cp.current_amount || 0).toFixed(2)}</span>`;
-                }
+                const sessionHtml = (cp.current_amount > 0)
+                    ? `<div class="fw-bold text-dark">€${(cp.current_amount).toFixed(2)}</div><div class="text-sub">${cp.driver_id || 'Anon'}</div>`
+                    : '<span class="text-secondary">-</span>';
 
-                // --- CORRECCIÓN DE VARIABLES AQUÍ ---
-                // Definimos stopDisabled y stopClass (antes tenías btnDisabled/btnClass)
-                
-                let stopDisabled = (cp.status === 'PARADO' || cp.status === 'AVERIADO' || cp.status === 'DESCONECTADO' || cp.status === 'FAILED') ? 'disabled' : '';
-                let stopClass = cp.status === 'SUMINISTRANDO' ? 'btn-danger' : 'btn-outline-danger';
-
-                let resumeDisabled = (cp.status === 'ACTIVADO' || cp.status === 'SUMINISTRANDO' || cp.status === 'DESCONECTADO') ? 'disabled' : '';
-                let resumeClass = (cp.status === 'PARADO' || cp.status === 'AVERIADO') ? 'btn-success' : 'btn-outline-success';
+                // Lógica Botones
+                const isStopped = ['PARADO', 'AVERIADO', 'DESCONECTADO', 'FAILED'].includes(cp.status);
+                const isActive = ['ACTIVADO', 'SUMINISTRANDO', 'DESCONECTADO'].includes(cp.status);
 
                 const row = `
-                    <tr>
-                        <td class="ps-4">
-                            <div class="fw-bold text-dark">CP-${cp.cp_id}</div>
-                            <div class="small text-muted"><i class="fa-solid fa-location-dot me-1"></i>${cp.location}</div>
-                        </td>
-                        <td><span class="badge badge-status ${badgeClass}">${icon} ${cp.status}</span></td>
-                        <td>${cp.driver_id || '<span class="text-muted">-</span>'}</td>
-                        <td>${powerHtml}</td>
-                        <td>${sessionHtml}</td>
+                    <tr class="${rowClass}">
                         <td>
-                            <div>${(cp.total_energy_supplied || 0).toFixed(1)} kWh</div>
-                            <div class="small text-muted">€${(cp.total_revenue || 0).toFixed(2)}</div>
-                        </td>
-                        <td>
-                            <div class="btn-group btn-group-sm" role="group">
-                                <button class="btn ${stopClass}" onclick="stopCP('${cp.cp_id}')" ${stopDisabled} title="Parar carga">
-                                    <i class="fa-solid fa-stop"></i>
-                                </button>
-                                <button class="btn ${resumeClass}" onclick="resumeCP('${cp.cp_id}')" ${resumeDisabled} title="Reactivar Punto">
-                                    <i class="fa-solid fa-play"></i>
-                                </button>
+                            <div class="d-flex align-items-center">
+                                <div class="avatar-circle bg-white border"><i class="fa-solid fa-charging-station"></i></div>
+                                <div>
+                                    <div class="fw-bold text-dark">CP-${cp.cp_id}</div>
+                                    <div class="text-sub">${cp.location}</div>
+                                </div>
                             </div>
+                        </td>
+                        <td><span class="status-pill ${pillClass}"><i class="fa-solid ${icon}"></i> ${cp.status}</span></td>
+                        <td>${sessionHtml}</td>
+                        <td>${powerHtml}</td>
+                        <td>
+                            <div class="fw-medium">${(cp.total_energy_supplied || 0).toFixed(1)} kWh</div>
+                            <div class="text-sub">€${(cp.total_revenue || 0).toFixed(2)}</div>
+                        </td>
+                        <td class="text-end">
+                            <button class="btn-action stop" onclick="stopCP('${cp.cp_id}')" ${isStopped ? 'disabled' : ''} title="Detener">
+                                <i class="fa-solid fa-stop"></i>
+                            </button>
+                            <button class="btn-action resume" onclick="resumeCP('${cp.cp_id}')" ${isActive ? 'disabled' : ''} title="Reanudar">
+                                <i class="fa-solid fa-play"></i>
+                            </button>
                         </td>
                     </tr>
                 `;
                 tbody.innerHTML += row;
             });
 
+            // Drivers Table Logic
             const drivers = data.drivers || [];
             const driversBody = document.getElementById('drivers-table-body');
             driversBody.innerHTML = '';
-
+            
             if (drivers.length === 0) {
-                driversBody.innerHTML = '<tr><td colspan="4" class="text-center py-4 text-muted">No hay conductores registrados</td></tr>';
+                driversBody.innerHTML = '<tr><td colspan="3" class="text-center py-4 text-secondary">Sin conductores</td></tr>';
             } else {
                 drivers.forEach(driver => {
-                    // Calculamos si el conductor está cargando actualmente
-                    // Buscando si su ID está en algún CP con estado SUMINISTRANDO
                     const activeCp = cps.find(cp => cp.driver_id === driver.driver_id && cp.status === 'SUMINISTRANDO');
-                    
-                    let statusBadge = '<span class="badge bg-secondary">Inactivo</span>';
-                    if (activeCp) {
-                        statusBadge = `<span class="badge bg-primary"><i class="fa-solid fa-bolt me-1"></i>Cargando en CP-${activeCp.cp_id}</span>`;
-                    }
+                    const statusBadge = activeCp 
+                        ? `<span class="status-pill charging"><i class="fa-solid fa-bolt"></i> Cargando (CP-${activeCp.cp_id})</span>`
+                        : `<span class="status-pill offline">Inactivo</span>`;
 
-                    // Formatear fecha
-                    const regDate = new Date(driver.registration_date).toLocaleString();
-
+                    const initial = driver.driver_id.charAt(0).toUpperCase();
                     const row = `
                         <tr>
-                            <td class="ps-4 fw-bold text-dark">${driver.driver_id}</td>
-                            <td>${statusBadge}</td>
-                            <td class="text-muted small">${regDate}</td>
                             <td>
-                                <button class="btn btn-sm btn-outline-secondary" disabled title="Gestión no implementada">
-                                    <i class="fa-solid fa-gear"></i>
-                                </button>
+                                <div class="d-flex align-items-center">
+                                    <div class="avatar-circle">${initial}</div>
+                                    <span class="fw-medium text-dark">${driver.driver_id}</span>
+                                </div>
                             </td>
+                            <td>${statusBadge}</td>
+                            <td class="text-secondary small">${new Date(driver.registration_date).toLocaleDateString()}</td>
                         </tr>
                     `;
                     driversBody.innerHTML += row;
                 });
             }
 
-            // Actualizar Tarjetas
+            // Update Counters
             document.getElementById('total-cps').innerText = cps.length;
             document.getElementById('active-cps').innerText = activeCount;
             document.getElementById('total-energy').innerText = totalEnergy.toFixed(1) + ' kWh';
@@ -289,69 +481,44 @@
         }
 
         function stopCP(cpId) {
-            if(!confirm(`¿Seguro que quieres DETENER el CP-${cpId}? En caso de estar suministrando, se generará el ticket y finalizará la sesión.`)) return;
-
+            if(!confirm(`¿Detener carga en CP-${cpId}?`)) return;
             fetch('/api/control/stop', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ cp_id: cpId })
-            })
-            .then(res => res.json())
-            .then(data => {
-                if(data.error) alert('Error: ' + data.error);
-                else console.log('STOP enviado', data);
-            })
-            .catch(err => alert('Error de conexión'));
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ cp_id: cpId })
+            }).catch(err => alert('Error de conexión'));
         }
 
         function resumeCP(cpId) {
-            // No pedimos confirmación o una muy simple, ya que reactivar es seguro
             fetch('/api/control/resume', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ cp_id: cpId })
-            })
-            .then(res => res.json())
-            .then(data => {
-                if(data.error) alert('Error: ' + data.error);
-                else console.log('RESUME enviado', data);
-            })
-            .catch(err => alert('Error de conexión'));
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ cp_id: cpId })
+            }).catch(err => alert('Error de conexión'));
         }
 
         function showToast(notif) {
             const container = document.getElementById('toastContainer');
-
-            // Icono según tipo
-            const icon = notif.type === 'danger' ? '<i class="fa-solid fa-snowflake me-2"></i>' : '<i class="fa-solid fa-sun me-2"></i>';
-
+            const icon = notif.type === 'danger' ? 'snowflake' : 'sun';
+            const color = notif.type === 'danger' ? '#fee2e2' : '#dcfce7';
+            const textColor = notif.type === 'danger' ? '#991b1b' : '#166534';
+            
             const html = `
-                <div class="toast align-items-center text-white bg-${notif.type} border-0 show" role="alert" aria-live="assertive" aria-atomic="true">
-                    <div class="d-flex">
-                        <div class="toast-body">
-                            <strong class="me-auto">${icon} ${notif.title}</strong><br>
-                            <small>${notif.time}</small>
-                            <div class="mt-1">${notif.message}</div>
-                        </div>
-                        <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast" aria-label="Close" onclick="this.parentElement.parentElement.remove()"></button>
+                <div class="dashboard-card mb-3 p-3 d-flex align-items-start shadow" style="background:${color}; color:${textColor}; min-width: 300px; border-left: 4px solid ${textColor};">
+                    <div class="me-3 fs-4"><i class="fa-solid fa-${icon}"></i></div>
+                    <div>
+                        <div class="fw-bold">${notif.title}</div>
+                        <div class="small mt-1">${notif.message}</div>
+                        <div class="text-end mt-1" style="font-size:0.7rem; opacity:0.8">${notif.time}</div>
                     </div>
                 </div>
             `;
-
-            // Insertar y auto-eliminar a los 6 segundos
             const tempDiv = document.createElement('div');
             tempDiv.innerHTML = html;
             const toastEl = tempDiv.firstElementChild;
             container.appendChild(toastEl);
-
-            setTimeout(() => {
-                if(toastEl) toastEl.remove();
-            }, 8000);
+            setTimeout(() => toastEl.remove(), 8000);
         }
 
         setupEventSource();
     </script>
-    <div class="toast-container position-fixed bottom-0 end-0 p-3" id="toastContainer" style="z-index: 1100;">
-    </div>
+
+    <div class="position-fixed bottom-0 end-0 p-4" id="toastContainer" style="z-index: 1100;"></div>
 </body>
 </html>
