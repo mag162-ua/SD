@@ -417,7 +417,20 @@ class EV_CP_E:
 
             else:
                 print(f"CP {self.ID} reparado")
-                self.estado = MENSAJES_CP_M.STATUS_OK.value
+                try:
+                    mensaje_resume = {
+                        'cp_id': self.ID,
+                        'command': 'RESUME',  # Este comando fuerza ACTIVADO en Central
+                        'reason': 'MANUAL_REPAIR_ENGINE',
+                        'source': 'engine_manual',
+                        'timestamp': datetime.now().isoformat()
+                    }
+                    # Usamos el tópico de control (control_commands)
+                    self.producer.send(EV_CP_E.TOPICO_CONTROL, mensaje_resume)
+                    self.producer.flush()
+                    print("✅ Notificación de reparación enviada a la Central")
+                except Exception as e:
+                    print(f"❌ Error notificando reparación: {e}")
                 self.averiado = False
 
         elif switch == "3": #Suministrar o parar suministro

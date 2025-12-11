@@ -8,6 +8,7 @@ import threading
 import json
 import time
 import logging
+from decimal import Decimal
 from datetime import datetime
 from typing import Dict, List, Optional
 import psycopg2
@@ -80,14 +81,14 @@ class ChargingPoint:
         return {
             'cp_id': self.cp_id,
             'location': self.location,
-            'price_per_kwh': self.price_per_kwh,
+            'price_per_kwh': float(self.price_per_kwh), # <--- AÑADIR float()
             'status': self.status,
-            'current_consumption': self.current_consumption,
-            'current_amount': self.current_amount,
+            'current_consumption': float(self.current_consumption), # <--- AÑADIR float()
+            'current_amount': float(self.current_amount), # <--- AÑADIR float()
             'driver_id': self.driver_id,
             'last_heartbeat': self.last_heartbeat.isoformat() if self.last_heartbeat else None,
-            'total_energy_supplied': self.total_energy_supplied,
-            'total_revenue': self.total_revenue,
+            'total_energy_supplied': float(self.total_energy_supplied), # <--- AÑADIR float()
+            'total_revenue': float(self.total_revenue), # <--- AÑADIR float()
             'registration_date': self.registration_date,
             'last_supply_message': self.last_supply_message.isoformat() if self.last_supply_message else None,
             'supply_ending': self.supply_ending, 
@@ -691,9 +692,17 @@ class RealKafkaManager:
         self.consumers = {}
         
         try:
+            
+            def custom_serializer(v):
+                if isinstance(v, Decimal):
+                    return float(v)
+                if isinstance(v, (datetime, date)):
+                    return v.isoformat()
+                raise TypeError(f"Type {type(v)} not serializable")
+
             self.producer = KafkaProducer(
                 bootstrap_servers=[self.bootstrap_servers],
-                value_serializer=lambda v: json.dumps(v).encode('utf-8'),
+                value_serializer=lambda v: json.dumps(v, default=custom_serializer).encode('utf-8'),
                 retries=2,
                 acks=1,
                 linger_ms=5,
@@ -886,7 +895,7 @@ class SocketServer:
         
         if existing_cp:
             # PERMITIR reconexión SOLO si DESCONECTADO
-            if existing_cp.status == "DESCONECTADO":
+            if existing_cp.status == "DESCONECTADO" or existing_cp.status == "AVERIADO":
                 logger.info(f"🔄 CP {cp_id} reconectando - Estado anterior: DESCONECTADO")
                 
                 # Actualizar datos del CP existente
@@ -947,7 +956,7 @@ class SocketServer:
             
                 status_changed = False
                 # SOLO cambiar si DESCONECTADO
-                if cp.status == "DESCONECTADO" or cp.status == "AVERIADO":
+                if cp.status == "DESCONECTADO": # or cp.status == "AVERIADO": #(cambiado por weather)
                     self.central.update_cp_status(cp_id, "ACTIVADO")
                     logger.info(f"🔄 CP {cp_id} reactivado - Estado cambiado a ACTIVADO")
                     status_changed = True
@@ -1443,7 +1452,7 @@ class EVCentral:
         logger.info(f"🔍 Consumo: {consumption}, Importe: {amount}, Driver: {driver_id}")
         
         # Verificar si realmente hay un cambio de estado
-        if previous_status == status:
+        if previous_status == status and status != "SUMINISTRANDO": ########
             logger.info(f"🔍 Mismo estado, no hay cambio necesario")
             return
 
@@ -1452,7 +1461,7 @@ class EVCentral:
         # Cuando termina un suministro
         if previous_status == "SUMINISTRANDO" and status != "SUMINISTRANDO" and status != "AVERIADO":
             logger.info(f"🔍 Finalizando suministro - registrando transacción")
-            if cp.current_amount > 0.01:
+            if float(cp.current_amount) > 0.01:
                 transaction_data = self.record_transaction(cp, "COMPLETED")
                 if transaction_data:
                     logger.info(f"💰 Transacción registrada para CP {cp_id}")
@@ -1483,8 +1492,8 @@ class EVCentral:
         # Actualizar estadísticas si suministrando
         if status == "SUMINISTRANDO" and consumption > 0:
             energy_increment = consumption / 3600
-            cp.total_energy_supplied += energy_increment
-            cp.total_revenue += amount
+            cp.total_energy_supplied = float(cp.total_energy_supplied) + float(energy_increment)
+            cp.total_revenue = float(cp.total_revenue) + float(amount)
         
         # Guardar los cambios en base de datos
         logger.info(f"🔍 Guardando cambios en base de datos...")
@@ -1649,6 +1658,68 @@ class EVCentral:
         except Exception as e:
             logger.error(f"❌ Error enviando notificación de fallo a Engine {cp_id}: {e}")
     
+    def process_control_command(self, message):
+        """Procesa comandos externos (ej: desde API Weather)"""
+        try:
+            # Si el mensaje viene como string, parsearlo
+            if isinstance(message, str):
+                message = json.loads(message)
+            
+            command = message.get('command')
+            cp_id = message.get('cp_id')
+            reason = message.get('reason', 'Sin razón especificada')
+            source = message.get('source', 'unknown')
+
+            # Ignoramos los comandos enviados por la propia Central para evitar bucles
+            if source == 'central':
+                return
+
+            logger.info(f"📨 Comando externo recibido: {command} para CP {cp_id} (Origen: {source})")
+
+            cp = self.database.get_charging_point(cp_id)
+            if not cp:
+                logger.error(f"❌ CP {cp_id} no encontrado para comando externo")
+                return
+
+            if command == 'FAILURE':
+                logger.warning(f"❄️ ALERTA RECIBIDA: Poniendo CP {cp_id} en AVERIADO. Razón: {reason}")
+                # Esto actualiza la variable en memoria Y la Base de Datos PostgreSQL
+                self.update_cp_status(cp_id, "AVERIADO")
+                
+                # Opcional: Si estaba cargando, forzar parada
+                if cp.status == "SUMINISTRANDO":
+                    self.handle_charging_failure(cp_id, reason)
+
+            elif command == 'RESUME':
+                logger.info(f"☀️ RESTABLECIMIENTO: Poniendo CP {cp_id} en ACTIVADO")
+                self.update_cp_status(cp_id, "ACTIVADO")
+
+            elif command == 'STOP':
+                logger.info(f"🛑 STOP Remoto recibido para CP {cp_id}")
+                
+                # Si estaba suministrando, cerramos la sesión formalmente
+                if cp.status == "SUMINISTRANDO":
+                    logger.info(f"🛑 Cerrando sesión y generando tickets para CP {cp_id}...")
+                    
+                    # 1. Registrar Transacción (Calcula totales y cierra sesión DB)
+                    transaction_data = self.record_transaction(cp, "COMPLETED")
+                    
+                    # 2. Enviar Tickets (Al Driver y al Engine)
+                    if transaction_data:
+                        self.send_ticket(cp_id, transaction_data)
+                        logger.info(f"🎫 Tickets enviados por parada remota en CP {cp_id}")
+                    
+                    # 3. Cambiar estado a PARADO
+                    self.update_cp_status(cp_id, "PARADO")
+                    
+                # Si solo estaba activado, pasamos a parado directamente
+                else:
+                    self.update_cp_status(cp_id, "PARADO")
+                    logger.info(f"⏹️ CP {cp_id} puesto en estado PARADO")
+                    
+        except Exception as e:
+            logger.error(f"❌ Error procesando comando externo: {e}", exc_info=True)
+
     def send_control_command(self, cp_id: str, command: str):
         """Envía comandos de control a CPs via Kafka """
         cp = self.database.get_charging_point(cp_id)
@@ -1668,10 +1739,28 @@ class EVCentral:
             print(f"✅ Comando {command} enviado a punto de carga {cp_id}")
             # Actualización de estado
             if command == "STOP":
-                if cp.status == "SUMINISTRANDO" or cp.status == "ACTIVADO":
+                # Si estaba suministrando, cerramos la sesión formalmente
+                if cp.status == "SUMINISTRANDO":
+                    logger.info(f"🛑 Parada Manual: Cerrando sesión y generando tickets para CP {cp_id}")
+                    
+                    # 1. Registrar Transacción (Esto pone a 0 los contadores del CP)
+                    # Usamos status "COMPLETED" ya que es una parada controlada, no un fallo técnico
+                    transaction_data = self.record_transaction(cp, "COMPLETED")
+                    
+                    # 2. Enviar Tickets (Al Driver y al Engine)
+                    if transaction_data:
+                        self.send_ticket(cp_id, transaction_data)
+                        logger.info(f"🎫 Tickets enviados por parada manual en CP {cp_id}")
+                    
+                    # 3. Cambiar estado a PARADO
+                    # Al haber llamado a record_transaction antes, el current_amount es 0.
+                    # Esto evita que update_cp_status genere un ticket duplicado.
+                    self.update_cp_status(cp_id, "PARADO")
+                    
+                # Si solo estaba activado, pasamos a parado directamente
+                elif cp.status == "ACTIVADO":
                     self.update_cp_status(cp_id, "PARADO")
                     logger.info(f"⏹️ CP {cp_id} puesto en estado PARADO")
-                print(f"✅ Comando STOP enviado a punto de carga {cp_id}")
             elif command == "START":
                 if cp.status == "ACTIVADO" and cp.status != "PARADO":
                     self.update_cp_status(cp_id, "SUMINISTRANDO")
@@ -1750,6 +1839,9 @@ class EVCentral:
                         messages = self.kafka_manager.get_messages(topic, consumer_group=group_id)
                         if messages:
                             logger.debug(f"📦 {len(messages)} mensajes en {topic}")
+                            for msg_data in messages:
+                                if topic == 'control_commands':
+                                    self.process_control_command(msg_data['message'])
                     except Exception as e:
                         logger.error(f"❌ Error en topic normal {topic}: {e}")
 
@@ -1863,7 +1955,7 @@ class EVCentral:
 
             cp_id = message.get('cp_id')
             driver_id = message.get('driver_id', 'MANUAL')
-            kwh = message.get('kwh', 0.0)
+            kwh = float(message.get('kwh', 0.0))
             reason = message.get('reason', '')
             
             if not cp_id:
@@ -1885,17 +1977,20 @@ class EVCentral:
                 return
 
             real_driver_id = cp.driver_id if cp.driver_id else driver_id
+
+            price_float = float(cp.price_per_kwh)
+            current_amount = kwh * price_float
             
             # Solo actualizaciones si es un conductor real
             if real_driver_id and real_driver_id != "MANUAL" and real_driver_id != "MANUAL_ENGINE":
-                current_amount = kwh * cp.price_per_kwh
+                total_revenue_float = float(cp.total_revenue)
                 self.send_flow_update_to_driver(
                     driver_id=real_driver_id,
                     cp_id=cp_id,
                     flow_rate=1.0,
                     energy_delivered=kwh,
                     current_amount=current_amount,
-                    total_amount=cp.total_revenue + current_amount,
+                    total_amount=total_revenue_float + current_amount,
                     location=cp.location,
                     price_per_kwh=cp.price_per_kwh,
                     timestamp=datetime.now().isoformat()
@@ -1905,7 +2000,6 @@ class EVCentral:
             # Suministro en progreso
             cp.last_supply_message = datetime.now()
             
-            current_amount = kwh * cp.price_per_kwh
             current_flow_rate = 1.0
             
             if cp.status != "PARADO":

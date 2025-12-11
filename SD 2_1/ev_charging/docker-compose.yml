@@ -103,6 +103,43 @@ services:
       - kafka-network
     command: ["tail", "-f", "/dev/null"]
 
+  api_central:
+      build: 
+        context: ./api_central
+        dockerfile: Dockerfile
+      depends_on:
+        - postgres
+        - kafka
+      ports:
+        - "8090:8090"
+      networks:
+        - kafka-network
+      environment:
+        - API_PORT=8090
+        - KAFKA_SERVERS=kafka:9092
+        - DB_HOST=postgres
+        - DB_NAME=ev_db
+        - DB_USER=user
+        - DB_PASSWORD=password
+      volumes:
+        - ./api_central/app:/app 
+      command: python -u /app/EV_API_Central.py
+
+  weather:
+    image: python:3.9-slim
+    volumes:
+      - ./weather/app:/app
+    working_dir: /app
+    command: sh -c "pip install requests && python -u /app/EV_W.py"
+    environment:
+      - CENTRAL_URL=http://api_central:8090/api/weather
+      # ¡Pon tu API Key aquí!
+      - OW_API_KEY=d77ed952764846a75a86e7ecf11df223
+    depends_on:
+      - api_central
+    networks:
+      - kafka-network
+
   # ======================================================================
   # 5. RESTO DE SERVICIOS
   # ======================================================================
@@ -161,6 +198,7 @@ services:
     networks:
       - kafka-network
     volumes:
+      - central_data:/app
       - ./central_logs:/app/logs  
       - ./central_backups:/app/backups 
     environment:
@@ -175,6 +213,7 @@ services:
       - DB_NAME=ev_db
       - DB_USER=user
       - DB_PASSWORD=password
+      - DATA_FILE=/app/ev_central_data.json
     # CAMBIAR PARA EJECUTAR EL SCRIPT AUTOMÁTICAMENTE
     command: ["tail", "-f", "/dev/null"]
 
@@ -188,3 +227,4 @@ networks:
 volumes:
   # Solo necesitamos un volumen nombrado para Kafka
   kafka_data: 
+  central_data:
