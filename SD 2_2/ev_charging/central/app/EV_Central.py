@@ -1600,13 +1600,14 @@ class EVCentral:
         # Enviar actualización via Kafka
         logger.info(f"🔍 Enviando actualización via Kafka...")
         self.kafka_manager.send_message('central_updates', cp.parse())
-        
-        self.database.add_audit_log(
-            source=f"CP-{cp_id}",
-            action="CAMBIO_ESTADO",
-            details=f"Estado cambió de {previous_status} a {status}. Driver: {driver_id or 'N/A'}",
-            ip_address=source_ip or "N/A"
-        )
+
+        if previous_status != status:
+            self.database.add_audit_log(
+                source=f"CP-{cp_id}",
+                action="CAMBIO_ESTADO",
+                details=f"Estado cambió de {previous_status} a {status}. Driver: {driver_id or 'N/A'}",
+                ip_address=source_ip or "N/A"
+            )
 
         logger.info(f"✅ Estado actualizado - CP: {cp_id}, Estado: {cp.status}")
         logger.info(f"🔍 DEBUG update_cp_status FIN - Estado verificado: '{cp.status}'")
@@ -2416,4 +2417,5 @@ def main():
         sys.exit(1)
 
 if __name__ == "__main__":
+
     main()
