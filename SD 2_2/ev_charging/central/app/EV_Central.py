@@ -513,6 +513,7 @@ class DatabaseManager:
     def register_driver(self, driver_id: str):
         """Registra un conductor Y guarda automáticamente"""
         self.drivers.add(driver_id)
+        self.add_audit_log("SISTEMA", "NUEVO_USUARIO", f"Conductor registrado: {driver_id}")
         logger.info(f"👤 Conductor {driver_id} registrado")
         
         if not self.connection_pool:
@@ -583,7 +584,7 @@ class DatabaseManager:
             
         try:
             logger.info("📦 Creando backup en PostgreSQL...")
-            
+            self.add_audit_log("SISTEMA", "BACKUP_CREADO", f"Tipo: {backup_type} - {description or ''}")
             # Preparar datos para el backup
             backup_data = {
                 'charging_points': [cp.parse() for cp in self.charging_points.values()],
@@ -641,7 +642,7 @@ class DatabaseManager:
                 return False
             
             logger.info(f"🔄 Restaurando desde backup ID {backup['backup_id']} - {backup['backup_type']}")
-            
+            self.add_audit_log("SISTEMA", "RESTAURACION_BACKUP", f"Sistema restaurado al estado del ID {backup['backup_id']}")
             backup_data = backup['data']
             
             # Limpiar datos actuales en memoria
@@ -703,6 +704,25 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"❌ Error obteniendo lista de backups: {e}")
             return []
+    
+    def add_audit_log(self, source: str, action: str, details: str, ip_address: str = "N/A"):
+        """Registra un evento de auditoría en la BD"""
+        if not self.connection_pool:
+            return
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO audit_logs (source, action, details, ip_address, timestamp)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (source, action, details, ip_address, datetime.now()))
+            conn.commit()
+            cursor.close()
+            self.return_connection(conn)
+            logger.debug(f"📝 Auditoría: [{action}] {source} - {details}")
+        except Exception as e:
+            logger.error(f"❌ Error escribiendo audit log: {e}")
+
 
 import json
 from kafka import KafkaProducer, KafkaConsumer
@@ -867,9 +887,11 @@ class SocketServer:
     
     def handle_client(self, client_socket, address):
         """Maneja conexiones de clientes"""
+        #ip_addr = f"{address[0]}:{address[1]}"
         try:
             logger.info(f"🔗 Conexión establecida desde {address}")
-            
+            #self.central.database.add_audit_log("SOCKET", "CONEXION_ENTRANTE", "Nuevo cliente conectado", ip_addr)
+
             while True:
                 data = client_socket.recv(1024).decode('utf-8')
                 if not data:
@@ -998,10 +1020,14 @@ class SocketServer:
         if self.central.database.add_charging_point(cp):
             response = "REGISTER_OK"
             client_socket.send(response.encode('utf-8'))
+            ip = client_socket.getpeername()[0] if client_socket else "Unknown"
+            self.central.database.add_audit_log(f"CP-{cp_id}", "AUTENTICACION_EXITO", "Punto de carga registrado", ip)
             logger.info(f"✅ Punto de carga {cp_id} registrado correctamente via socket")
         else:
             response = f"ERROR#CP_ya_registrado#{cp_id}"
             client_socket.send(response.encode('utf-8'))
+            ip = client_socket.getpeername()[0] if client_socket else "Unknown"
+            self.central.database.add_audit_log(f"CP-{cp_id}", "AUTENTICACION_FALLIDA", "Intento de registro duplicado o inválido", ip)
             logger.error(f"❌ Error inesperado registrando CP {cp_id}")
     
     def handle_cp_ok(self, params: List[str], client_socket):
@@ -1025,7 +1051,8 @@ class SocketServer:
                 status_changed = False
                 # SOLO cambiar si DESCONECTADO
                 if cp.status == "DESCONECTADO": # or cp.status == "AVERIADO": #(cambiado por weather)
-                    self.central.update_cp_status(cp_id, "ACTIVADO")
+                    ip_cliente = client_socket.getpeername()[0] if client_socket else "Unknown"
+                    self.central.update_cp_status(cp_id, "ACTIVADO", source_ip=ip_cliente)
                     logger.info(f"🔄 CP {cp_id} reactivado - Estado cambiado a ACTIVADO")
                     status_changed = True
                 
@@ -1074,7 +1101,8 @@ class SocketServer:
                 logger.info(f"🔌 Suministro interrumpido para conductor {driver_id} por avería en CP {cp_id}")
             
             # Actualizar estado a AVERIADO
-            self.central.update_cp_status(cp_id, "AVERIADO")
+            ip_cliente = client_socket.getpeername()[0] if client_socket else "Unknown"
+            self.central.update_cp_status(cp_id, "AVERIADO", source_ip=ip_cliente)
             
             response = f"CP_KO_ACK#{cp_id}"
             client_socket.send(response.encode('utf-8'))
@@ -1233,7 +1261,7 @@ class EVCentral:
         
         if cp.status == "SUMINISTRANDO":
             logger.info(f"🛑 Detectada carga fallida en CP {cp_id} - Razón: {failure_reason}")
-            
+            self.database.add_audit_log(f"CP-{cp_id}", "INCIDENCIA_SERVICIO", f"Fallo de carga: {failure_reason}")
             # REgistrar transacción fallida
             real_driver_id = driver_id or cp.driver_id
             if real_driver_id:
@@ -1497,18 +1525,20 @@ class EVCentral:
                         elif cp.status == "PARADO":
                             logger.debug(f"🟠 CP {cp.cp_id} está PARADO intencionalmente - Ignorando falta de heartbeat")
     
-    def update_cp_status(self, cp_id: str, status: str, consumption: float = 0.0, amount: float = 0.0, driver_id: str = None):
+    def update_cp_status(self, cp_id: str, status: str, consumption: float = 0.0, amount: float = 0.0, driver_id: str = None, source_ip: str = None):
         """Actualiza el estado de un punto de carga"""
         cp = self.database.get_charging_point(cp_id)
+
         if not cp:
             logger.error(f"❌ CP {cp_id} no encontrado en update_cp_status")
             return
             
+        previous_status = cp.status
+
         if driver_id:
             cp.driver_id = driver_id
             logger.info(f"🔍 Driver ID actualizado: {driver_id} para CP {cp_id}")
-
-        previous_status = cp.status
+            #self.database.register_driver(driver_id)
 
         if status == "SUMINISTRANDO" and previous_status != "SUMINISTRANDO":
             logger.info(f"🔄 Iniciando nuevo suministro - Reseteando contadores para CP {cp_id}")
@@ -1562,7 +1592,7 @@ class EVCentral:
             energy_increment = consumption / 3600
             cp.total_energy_supplied = float(cp.total_energy_supplied) + float(energy_increment)
             cp.total_revenue = float(cp.total_revenue) + float(amount)
-        
+
         # Guardar los cambios en base de datos
         logger.info(f"🔍 Guardando cambios en base de datos...")
         self.database.save_charging_point(cp)
@@ -1571,6 +1601,13 @@ class EVCentral:
         logger.info(f"🔍 Enviando actualización via Kafka...")
         self.kafka_manager.send_message('central_updates', cp.parse())
         
+        self.database.add_audit_log(
+            source=f"CP-{cp_id}",
+            action="CAMBIO_ESTADO",
+            details=f"Estado cambió de {previous_status} a {status}. Driver: {driver_id or 'N/A'}",
+            ip_address=source_ip or "N/A"
+        )
+
         logger.info(f"✅ Estado actualizado - CP: {cp_id}, Estado: {cp.status}")
         logger.info(f"🔍 DEBUG update_cp_status FIN - Estado verificado: '{cp.status}'")
         
@@ -1595,7 +1632,11 @@ class EVCentral:
             
             if self.database.add_transaction(transaction):
                 logger.info(f"💰 Transacción registrada: {transaction_id} - CP: {cp.cp_id}, Importe: €{cp.current_amount:.2f}")
-                
+                self.database.add_audit_log(
+                    f"CP-{cp.cp_id}", 
+                    "TICKET_EMITIDO", 
+                    f"Tx: {transaction_id} | Importe: {cp.total_revenue:.2f}€ | Energía: {cp.total_energy_supplied:.2f}kWh"
+                )
                 # Reset contadores después de registrar transacción
                 cp.current_consumption = 0.0
                 cp.current_amount = 0.0
@@ -1752,7 +1793,7 @@ class EVCentral:
             if command == 'FAILURE':
                 logger.warning(f"❄️ ALERTA RECIBIDA: Poniendo CP {cp_id} en AVERIADO. Razón: {reason}")
                 # Esto actualiza la variable en memoria Y la Base de Datos PostgreSQL
-                self.update_cp_status(cp_id, "AVERIADO")
+                self.update_cp_status(cp_id, "AVERIADO", source_ip=source)
                 
                 # Opcional: Si estaba cargando, forzar parada
                 if cp.status == "SUMINISTRANDO":
@@ -1760,7 +1801,7 @@ class EVCentral:
 
             elif command == 'RESUME':
                 logger.info(f"☀️ RESTABLECIMIENTO: Poniendo CP {cp_id} en ACTIVADO")
-                self.update_cp_status(cp_id, "ACTIVADO")
+                self.update_cp_status(cp_id, "ACTIVADO", source_ip=source)
 
             elif command == 'STOP':
                 logger.info(f"🛑 STOP Remoto recibido para CP {cp_id}")
@@ -1778,11 +1819,11 @@ class EVCentral:
                         logger.info(f"🎫 Tickets enviados por parada remota en CP {cp_id}")
                     
                     # 3. Cambiar estado a PARADO
-                    self.update_cp_status(cp_id, "PARADO")
+                    self.update_cp_status(cp_id, "PARADO", source_ip=source)
                     
                 # Si solo estaba activado, pasamos a parado directamente
                 else:
-                    self.update_cp_status(cp_id, "PARADO")
+                    self.update_cp_status(cp_id, "PARADO", source_ip=source)
                     logger.info(f"⏹️ CP {cp_id} puesto en estado PARADO")
                     
         except Exception as e:
@@ -2268,6 +2309,10 @@ class EVCentral:
     
     def handle_driver_status_query(self, driver_id: str, cp_id: str = None):
         """Maneja consulta de estado desde conductor"""
+        if driver_id and driver_id not in self.database.drivers:
+            self.database.register_driver(driver_id)
+            logger.info(f"🆕 Conductor {driver_id} registrado automáticamente al consultar estado")
+
         if cp_id:
             cp = self.database.get_charging_point(cp_id)
             if cp:

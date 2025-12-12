@@ -25,6 +25,7 @@ DB_PASSWORD = os.getenv("DB_PASSWORD", "password")
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('API_Central')
 
+NOTIFICATIONS = []
 # --- KAFKA PRODUCER ---
 producer = None
 try:
@@ -71,10 +72,16 @@ def get_full_status():
         cur.execute("SELECT * FROM charging_points ORDER BY cp_id ASC")
         cps = cur.fetchall()
         
+        cur.execute("SELECT * FROM drivers ORDER BY registration_date DESC")
+        drivers = cur.fetchall()
+
         # 2. Leer últimas Transacciones
         cur.execute("SELECT * FROM transactions ORDER BY created_at DESC LIMIT 10")
         txs = cur.fetchall()
         
+        cur.execute("SELECT * FROM audit_logs ORDER BY timestamp DESC LIMIT 50")
+        audit_logs = cur.fetchall()
+
         cur.execute("""
             SELECT 
                 COALESCE(SUM(energy_consumed), 0) as hist_energy, 
@@ -103,7 +110,9 @@ def get_full_status():
         # Estructura de datos para el Frontend
         data = {
             "charging_points": cps,
+            "drivers": drivers,
             "transactions": txs,
+            "audit_logs": audit_logs,
             "general_stats": {
                 "total_energy": total_kwh_global,
                 "total_revenue": total_eur_global,
@@ -117,7 +126,7 @@ def get_full_status():
     except Exception as e:
         logger.error(f"Error consulta SQL: {e}")
         if conn: conn.close()
-        return {"charging_points": [], "transactions": []}
+        return {"charging_points": [], "transactions": [], "drivers": []}
 
 # --- ENDPOINTS ---
 
@@ -140,6 +149,13 @@ def receive_weather_alert():
     city = data.get('city')
     
     logger.warning(f"❄️ ALERTA CLIMÁTICA para {cp_id} en {city}: {temp}ºC")
+
+    NOTIFICATIONS.append({
+        "type": "danger",
+        "title": "❄️ ALERTA DE CLIMA",
+        "message": f"Baja temperatura en {city} ({temp}ºC). CP-{cp_id} detenido.",
+        "time": datetime.now().strftime("%H:%M:%S")
+    })
 
     # --- MODIFICACIÓN AQUÍ ---
     # Enviamos 'FAILURE' en lugar de 'STOP'.
@@ -170,6 +186,13 @@ def receive_weather_clear():
     
     logger.info(f"☀️ CLIMA RESTABLECIDO para {cp_id}")
 
+    NOTIFICATIONS.append({
+        "type": "success",
+        "title": "☀️ CLIMA RESTABLECIDO",
+        "message": f"Temperatura segura. CP-{cp_id} operativo.",
+        "time": datetime.now().strftime("%H:%M:%S")
+    })
+
     # Enviamos comando RESUME a Central vía Kafka
     # La Central debe interpretar esto para poner el estado en AVAILABLE
     message = {
@@ -196,6 +219,11 @@ def stream():
         while True:
             # Consultar DB
             data = get_full_status()
+
+            if NOTIFICATIONS:
+                data['notifications'] = list(NOTIFICATIONS) # Copiamos la lista
+                NOTIFICATIONS.clear() # Vaciamos el buzón para no repetirlas
+
             # Formato Server-Sent Events
             yield f"data: {json.dumps(data)}\n\n"
             time.sleep(2) # Actualizar cada 2 segundos
