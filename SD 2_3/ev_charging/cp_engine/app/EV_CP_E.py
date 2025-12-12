@@ -41,7 +41,7 @@ class Ticket: #CONFIGURAR SEGUN NECESIDADES
         self.timestamp = timestamp
         self.tiempo_pantalla = tiempo_pantalla
         self.my_ip = self.get_local_ip()
-    
+        
     def get_local_ip(self):
         """Obtiene la IP real de la máquina (útil en Docker)"""
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -100,6 +100,7 @@ class EV_CP_E:
     TOPICO_CONTROL = "control_commands"
     TOPICO_TICKETS = "engine_tickets"
     RUTA_FICHERO = "/app/estado_engine/"
+    RUTA_CLAVES = "/app/cp_claves/"
     
 
     def __init__(self, IP_PUERTO_BROKER, PUERTO):
@@ -118,7 +119,17 @@ class EV_CP_E:
         self.ticket_actual = None # Ticket actual en pantalla
         self.averiado = False # Estado de avería
         self.my_ip = self.get_local_ip()
+        self.secret_key = None
         print(f"Engine inicializado con IP_BROKER: {self.IP_BROKER}, PUERTO_BROKER: {self.PUERTO_BROKER}")
+    
+    def obtener_clave_secreta(self):
+        try:
+            with open(EV_CP_E.RUTA_CLAVES+f"clave_{self.ID}.json", "r") as archivo:
+                estado_info = json.load(archivo)
+                self.secret_key = estado_info.get("secret_key", None)
+        except Exception as e:
+            print(f"❌ Error al obtener la clave secreta: {e}")
+            return None
 
     def get_local_ip(self):
         """Obtiene la IP local del contenedor/máquina"""
@@ -350,7 +361,7 @@ class EV_CP_E:
                     'reason': MENSAJES_CP_M.SUMINISTRANDO.value,
                     'source_ip': self.my_ip
                 }
-                
+                self.obtener_clave_secreta()
                 # Enviar mensaje a la central 
                 self.producer.send(EV_CP_E.TOPICO_ACCION, mensaje)
                 self.producer.flush()
@@ -387,7 +398,7 @@ class EV_CP_E:
 
             os.system('cls' if os.name == 'nt' else 'clear') #Limpiar pantalla
             
-            print(f"\n--- Menú del Engine {self.ID} : {self.IP_E}:{self.PUERTO_E}---")
+            print(f"\n--- {self.secret_key} Menú del Engine {self.ID} : {self.IP_E}:{self.PUERTO_E}---")
             print("1. Mostrar estado actual") #Mostrar estado actual
 
             if self.estado == MENSAJES_CP_M.STATUS_OK.value: #Si está OK o KO

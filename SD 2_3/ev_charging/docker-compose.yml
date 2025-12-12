@@ -157,6 +157,7 @@ services:
       - LC_ALL=C.UTF-8
     volumes:
       - ./engine_status:/app/estado_engine
+      - ./cp_claves:/app/cp_claves
     command: ["tail", "-f", "/dev/null"]
 
   cp_monitor:
@@ -169,7 +170,10 @@ services:
     environment:
       - LANG=C.UTF-8
       - LC_ALL=C.UTF-8
-      - REGISTRY_URL=https://registry:8080 
+      - REGISTRY_URL=https://registry:8080
+    volumes:
+      - ./cp_claves:/app/cp_claves
+      - ./ciudades:/app/ciudades
     command: ["tail", "-f", "/dev/null"]
 
   driver:
@@ -200,7 +204,8 @@ services:
     volumes:
       - central_data:/app
       - ./central_logs:/app/logs  
-      - ./central_backups:/app/backups 
+      - ./central_backups:/app/backups
+      - ./central_claves:/app/central_claves
     environment:
       - SOCKET_HOST=0.0.0.0
       - SOCKET_PORT=5000

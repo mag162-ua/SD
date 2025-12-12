@@ -13,6 +13,8 @@ from datetime import datetime,date
 from typing import Dict, List, Optional
 import psycopg2
 from psycopg2 import pool, extras, OperationalError
+from cryptography.fernet import Fernet
+import base64
 
 # Configuración de logging MEJORADA para Docker
 def setup_logging():
@@ -234,6 +236,7 @@ class DatabaseManager:
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS charging_points (
                     cp_id VARCHAR(50) PRIMARY KEY,
+                    secret_key VARCHAR(100) NOT NULL,
                     location VARCHAR(100) NOT NULL,
                     price_per_kwh DECIMAL(10, 2) NOT NULL,
                     status VARCHAR(20) NOT NULL DEFAULT 'DESCONECTADO',
@@ -375,6 +378,29 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"❌ Error cargando datos desde PostgreSQL: {e}", exc_info=True)
             return False
+    
+    def get_new_secret_key(self, cp_id) -> Optional[str]:
+        secret_key = Fernet.generate_key().decode()
+        estado_info = {
+            "ID": cp_id,
+            "secret_key": secret_key
+        }
+        try:
+            with open(f"/app/central_claves/clave_{cp_id}.json", "w") as archivo:
+                json.dump(estado_info, archivo, indent=4)
+            print(f"Clave del CP guardado en clave_{cp_id}.json")
+            return secret_key
+        except Exception as e:
+            logger.error(f"Error al guardar la clave del CP-{cp_id}: {e}")
+            return None
+    
+    def eliminar_clave_secreta(self, cp_id):
+        if os.path.exists(f"/app/central_claves/clave_{cp_id}.json"):
+            try:
+                os.remove(f"/app/central_claves/clave_{cp_id}.json")
+                logger.info(f"Clave secreta del CP-{cp_id} eliminada correctamente")
+            except Exception as e:
+                logger.error(f"Error al eliminar la clave secreta del CP-{cp_id}: {e}")
     
     def save_charging_point(self, cp: ChargingPoint) -> bool:
         """Guarda un punto de carga en la base de datos"""
@@ -957,6 +983,8 @@ class SocketServer:
         del self.central.database.charging_points[cp_id]
         logger.info(f"🗑️ CP {cp_id} eliminado del diccionario en memoria")
 
+        self.central.database.eliminar_clave_secreta(cp_id)
+
         response = "DEREGISTER_OK"
         client_socket.send(response.encode('utf-8'))
         logger.info(f"✅ CP {cp_id} deregistrado correctamente via socket")
@@ -983,6 +1011,16 @@ class SocketServer:
             client_socket.send(response.encode('utf-8'))
             return
         
+        new_secret_key = self.central.database.get_new_secret_key(cp_id)
+
+        if new_secret_key is None:
+            logger.error(f"❌ CP {cp_id} no se pudo generar nueva clave secreta")
+            response = f"ERROR#No_se_pudo_generar_clave_secreta#{cp_id}"
+            client_socket.send(response.encode('utf-8'))
+            return
+        
+        REGISTER_OK = f"REGISTER_OK#{new_secret_key}"
+        
         if existing_cp:
             # PERMITIR reconexión SOLO si DESCONECTADO
             if existing_cp.status == "DESCONECTADO" or existing_cp.status == "AVERIADO":
@@ -999,7 +1037,7 @@ class SocketServer:
                 self.central.database.save_charging_point(existing_cp)
                 
                 # REGISTER_OK
-                response = "REGISTER_OK"
+                response = REGISTER_OK
                 client_socket.send(response.encode('utf-8'))
                 logger.info(f"✅ CP {cp_id} reconectado correctamente")
                 return
@@ -1018,7 +1056,7 @@ class SocketServer:
         cp.status = "ACTIVADO"  # Estado inicial al registrar
         
         if self.central.database.add_charging_point(cp):
-            response = "REGISTER_OK"
+            response = REGISTER_OK
             client_socket.send(response.encode('utf-8'))
             ip = client_socket.getpeername()[0] if client_socket else "Unknown"
             self.central.database.add_audit_log(f"CP-{cp_id}", "AUTENTICACION_EXITO", "Punto de carga registrado", ip)

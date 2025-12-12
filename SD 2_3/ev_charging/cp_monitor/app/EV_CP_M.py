@@ -9,6 +9,7 @@ import enum                    # Necesario para definir enumeraciones
 from faker import Faker        # Importamos la librería Faker
 import random
 import requests
+import json
 if os.name != 'nt':
     import select
     import tty
@@ -35,6 +36,7 @@ class EV_CP_M:
 
     REGISTRY_URL=os.getenv('REGISTRY_URL', "https://registry:8080")  # URL del registro desde variable de entorno
     RUTA_CIUDADES = "/app/ciudades/"  # Ruta de las ciudades, se asume que está en el contenedor
+    RUTA_CLAVES = "/app/cp_claves/"      # Ruta para almacenar las claves secretas
 
     def __init__(self, IP_PUERTO_E, IP_PUERTO_C, ID, LOCALIZACION, KWH):
         self.IP_E, self.PUERTO_E = IP_PUERTO_E.split(':')      # Dirección IP y puerto del emulador EV
@@ -66,6 +68,18 @@ class EV_CP_M:
         else:
             print(f"Archivo de ciudades no encontrado en {EV_CP_M.RUTA_CIUDADES}ciudades.json")
             return "Desconocida"
+    
+    def almacenar_clave_acceso(self, clave):
+        clave = {
+            "ID": self.ID,
+            "secret_key": clave
+        }
+        try:
+            with open(EV_CP_M.RUTA_CLAVES+f"clave_{self.ID}.json", "w") as archivo:
+                json.dump(clave, archivo, indent=4)
+            print(f"Clave de acceso almacenada en {EV_CP_M.RUTA_CLAVES}/clave_{self.ID}")
+        except Exception as e:
+            print(f"Error al almacenar la clave de acceso: {e}")
 
     def dar_de_alta(self):
         # Lógica para obtener la clave de acceso del registro
@@ -181,7 +195,8 @@ class EV_CP_M:
         respuesta = self.enviar_mensaje_socket_persistente(self.IP_C, self.PUERTO_C, MENSAJES_CP_M.REGISTER_CP.value+f"#{self.ID}#{self.localizacion}#{self.kwh}#{self.clave_acceso}")
         
         # Procesar la respuesta de la central
-        if respuesta == MENSAJES_CP_M.REGISTER_OK.value:
+        if respuesta.startswith(MENSAJES_CP_M.REGISTER_OK.value):
+            self.almacenar_clave_acceso(respuesta.split('#')[1])
             print(f"Monitor {self.ID} registrado exitosamente en la central.")
             self.autorizado = True
             return True
@@ -274,16 +289,19 @@ class EV_CP_M:
                 # 4. Procesar respuesta
                 if respuesta == MENSAJES_CP_M.STATUS_OK.value:
                     # Solo notificar a central si antes estaba desconectado/error (para no saturar central)
-                    #if not self.connect_engine: 
-                    self.enviar_mensaje_socket_transitiva(self.IP_C, self.PUERTO_C, MENSAJES_CP_M.OK_CP.value+f"#{self.ID}")
-                    self.connect_engine = True
+                    #if not self.connect_engine:
+                    print(f"✅ Engine reporta OK")
+                    if self.autorizado:
+                        self.enviar_mensaje_socket_transitiva(self.IP_C, self.PUERTO_C, MENSAJES_CP_M.OK_CP.value+f"#{self.ID}")
+                        self.connect_engine = True
                     # Opcional: print solo para debug, comentar para producción
                     # print(f"Estado Engine OK") 
 
                 elif respuesta == MENSAJES_CP_M.STATUS_KO.value:
                     print(f"🚨 Engine reporta AVERÍA")
-                    self.enviar_mensaje_socket_transitiva(self.IP_C, self.PUERTO_C, MENSAJES_CP_M.KO_CP.value+f"#{self.ID}")
-                    self.connect_engine = True # Hay conexión, pero el engine dice que está KO
+                    if self.autorizado:
+                        self.enviar_mensaje_socket_transitiva(self.IP_C, self.PUERTO_C, MENSAJES_CP_M.KO_CP.value+f"#{self.ID}")
+                        self.connect_engine = True # Hay conexión, pero el engine dice que está KO
 
             except (socket.timeout, socket.error, ConnectionResetError, BrokenPipeError) as e:
                 print(f"⚠️ Pérdida de conexión con Engine: {e}")
@@ -292,7 +310,8 @@ class EV_CP_M:
                 socket_engine = None
                 self.connect_engine = False
                 # Notificar a la central que el CP no responde
-                self.enviar_mensaje_socket_transitiva(self.IP_C, self.PUERTO_C, MENSAJES_CP_M.KO_CP.value+f"#{self.ID}")
+                if self.autorizado:
+                    self.enviar_mensaje_socket_transitiva(self.IP_C, self.PUERTO_C, MENSAJES_CP_M.KO_CP.value+f"#{self.ID}")
             
             except Exception as e:
                 print(f"❌ Error inesperado en monitor: {e}")
