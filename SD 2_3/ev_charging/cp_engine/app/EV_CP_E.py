@@ -9,6 +9,9 @@ import json
 import os
 from datetime import datetime
 from kafka import KafkaConsumer, KafkaProducer
+import hashlib
+import base64
+from cryptography.fernet import Fernet
 if os.name != 'nt':
     import select
     import tty
@@ -119,14 +122,14 @@ class EV_CP_E:
         self.ticket_actual = None # Ticket actual en pantalla
         self.averiado = False # Estado de avería
         self.my_ip = self.get_local_ip()
-        self.secret_key = None
+        #self.secret_key = None
         print(f"Engine inicializado con IP_BROKER: {self.IP_BROKER}, PUERTO_BROKER: {self.PUERTO_BROKER}")
     
     def obtener_clave_secreta(self):
         try:
             with open(EV_CP_E.RUTA_CLAVES+f"clave_{self.ID}.json", "r") as archivo:
                 estado_info = json.load(archivo)
-                self.secret_key = estado_info.get("secret_key", None)
+                #self.secret_key = estado_info.get("secret_key", None)
         except Exception as e:
             print(f"❌ Error al obtener la clave secreta: {e}")
             return None
@@ -225,15 +228,16 @@ class EV_CP_E:
                                     self.ID = mensaje.split('#')[1]
                                     print(f"🆔 ID del engine asignado: {self.ID}")
                                     self.estado = MENSAJES_CP_M.STATUS_OK.value
-
-                                if MENSAJES_CP_M.STATUS_E.value in mensaje:
-                                    # Si no está averiado por comando manual, responder OK
-                                    if not self.averiado:
-                                        self.estado = MENSAJES_CP_M.STATUS_OK.value
                                     
-                                    # Responder al monitor
-                                    respuesta = self.estado
-                                    conexion_monitor.sendall(respuesta.encode())
+                                if '#' in mensaje and self.ID == mensaje.split('#')[1]:
+                                    if MENSAJES_CP_M.STATUS_E.value in mensaje:
+                                        # Si no está averiado por comando manual, responder OK
+                                        if not self.averiado:
+                                            self.estado = MENSAJES_CP_M.STATUS_OK.value
+                                        
+                                        # Responder al monitor
+                                        respuesta = self.estado
+                                        conexion_monitor.sendall(respuesta.encode())
                                     
                         except ConnectionResetError:
                             print("⚠️ Conexión reseteada por el Monitor.")
@@ -468,6 +472,7 @@ class EV_CP_E:
                     # Usamos el tópico de control (control_commands)
                     self.producer.send(EV_CP_E.TOPICO_CONTROL, mensaje_resume)
                     self.producer.flush()
+                    #self.averiado = False
                     print("✅ Notificación de reparación enviada a la Central")
                 except Exception as e:
                     print(f"❌ Error notificando reparación: {e}")

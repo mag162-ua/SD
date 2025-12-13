@@ -322,7 +322,7 @@ class DatabaseManager:
             # Cargar puntos de carga
             cursor.execute("SELECT * FROM charging_points")
             charging_points_data = cursor.fetchall()
-            
+
             self.charging_points.clear()
             for cp_data in charging_points_data:
                 try:
@@ -332,8 +332,10 @@ class DatabaseManager:
                     cp_dict['last_supply_message'] = cp_data['last_supply_message'].isoformat() if cp_data['last_supply_message'] else None
                     cp_dict['supply_ended_time'] = cp_data['supply_ended_time'].isoformat() if cp_data['supply_ended_time'] else None
                     cp_dict['registration_date'] = cp_data['registration_date'].isoformat() if cp_data['registration_date'] else datetime.now().isoformat()
-                    
+
                     cp = ChargingPoint.unparse(cp_dict)
+                    cp.status = 'DESCONECTADO'  # Reiniciar estado a DESCONECTADO al cargar
+                    cp.socket_connection = None  # No mantener conexiones de socket al cargar
                     self.charging_points[cp.cp_id] = cp
                 except Exception as e:
                     logger.error(f"❌ Error cargando CP {cp_data.get('cp_id', 'desconocido')}: {e}")

@@ -272,7 +272,8 @@ class EV_CP_M:
                     except Exception as e:
                         print(f"❌ Error de conexión con Engine: {e}")
                         socket_engine = None
-                        self.enviar_mensaje_socket_transitiva(self.IP_C, self.PUERTO_C, MENSAJES_CP_M.KO_CP.value+f"#{self.ID}")
+                        if self.autorizado:
+                            self.enviar_mensaje_socket_transitiva(self.IP_C, self.PUERTO_C, MENSAJES_CP_M.KO_CP.value+f"#{self.ID}")
                         time.sleep(2)
                         continue # Reintentar en el siguiente ciclo
 
