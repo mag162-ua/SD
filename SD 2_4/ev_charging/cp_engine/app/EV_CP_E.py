@@ -122,6 +122,7 @@ class EV_CP_E:
         self.ticket_actual = None # Ticket actual en pantalla
         self.averiado = False # Estado de avería
         self.my_ip = self.get_local_ip()
+        self.intentos_de_reparación = 1
         #self.secret_key = None
         print(f"Engine inicializado con IP_BROKER: {self.IP_BROKER}, PUERTO_BROKER: {self.PUERTO_BROKER}")
     
@@ -303,23 +304,42 @@ class EV_CP_E:
                                 break # Salir del bucle interno, volver a accept()
                                 
                             mensaje = data.decode('utf-8').strip()
-                            
+                            primer_mensaje = False
                             if mensaje:
                                 if self.ID is None and '#' in mensaje:
                                     # Formato esperado mensaje inicial: STATUS_E#ID_CP
                                     self.ID = mensaje.split('#')[1]
                                     print(f"🆔 ID del engine asignado: {self.ID}")
                                     self.estado = MENSAJES_CP_M.STATUS_OK.value
+                                    primer_mensaje = True
                                     
                                 if '#' in mensaje and self.ID == mensaje.split('#')[1]:
                                     if MENSAJES_CP_M.STATUS_E.value in mensaje:
                                         # Si no está averiado por comando manual, responder OK
+                                        
                                         if not self.averiado:
                                             self.estado = MENSAJES_CP_M.STATUS_OK.value
                                         
                                         # Responder al monitor
                                         respuesta = self.estado
                                         conexion_monitor.sendall(respuesta.encode())
+                                
+                                if self.intentos_de_reparación:
+                                            
+                                    mensaje_resume = {
+                                        'cp_id': self.ID,
+                                        'command': 'RESUME',  # Este comando fuerza ACTIVADO en Central
+                                        'reason': 'MANUAL_REPAIR_ENGINE',
+                                        'source': 'engine_manual',
+                                        'timestamp': datetime.now().isoformat()
+                                    }
+                                    # Usamos el tópico de control (control_commands)
+
+                                    mensaje_resume = self.cifrar_mensaje_completo(mensaje_resume)
+
+                                    self.producer.send(EV_CP_E.TOPICO_CONTROL, mensaje_resume)
+                                    self.producer.flush()
+                                    self.intentos_de_reparación -= 1
                                     
                         except ConnectionResetError:
                             print("⚠️ Conexión reseteada por el Monitor.")
@@ -344,7 +364,7 @@ class EV_CP_E:
             for mensaje in self.consumer: #Bucle infinito para escuchar mensajes
                 try:
                     mensaje_valor = mensaje.value 
-                    print(f"📨 Mensaje recibido de la central: {mensaje_valor}")
+                    #print(f"📨 Mensaje recibido de la central: {mensaje_valor}")
                     
                     if isinstance(mensaje_valor, str): # Asegurarse de que el mensaje es un diccionario
                         try:
@@ -366,6 +386,8 @@ class EV_CP_E:
                         print(f"🎯 Mensaje para este CP {self.ID}")
 
                         mensaje_valor = self.descifrar_mensaje_completo(mensaje_valor)
+                    
+                        print(f"📨 Mensaje recibido de la central: {mensaje_valor}")
 
                         if mensaje_valor is None:
                             print("❌ Error: No se pudo descifrar el mensaje o no es válido. Se descartará.")
@@ -571,6 +593,9 @@ class EV_CP_E:
                         'timestamp': datetime.now().isoformat()
                     }
                     # Usamos el tópico de control (control_commands)
+
+                    mensaje_resume = self.cifrar_mensaje_completo(mensaje_resume)
+
                     self.producer.send(EV_CP_E.TOPICO_CONTROL, mensaje_resume)
                     self.producer.flush()
                     #self.averiado = False

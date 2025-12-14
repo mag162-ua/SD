@@ -293,12 +293,24 @@ class DatabaseManager:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS audit_logs (
+                    id SERIAL PRIMARY KEY,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    source VARCHAR(100), 
+                    ip_address VARCHAR(50), 
+                    action VARCHAR(50), 
+                    details TEXT
+                )
+            """)
             
             # Crear índices
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_cp_status ON charging_points(status)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_transactions_cp_id ON transactions(cp_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_transactions_driver_id ON transactions(driver_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_backups_created_at ON backups(created_at)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_logs_timestamp ON audit_logs(timestamp)")
             
             conn.commit()
             cursor.close()
@@ -803,6 +815,8 @@ class RealKafkaManager:
     def cifrar_mensaje_completo(self, mensaje_completo):
 
         cp_id_visible = mensaje_completo.get('cp_id')
+        if cp_id_visible is None:
+            return mensaje_completo
         
         secret_key = self.get_new_secret_key(cp_id_visible)
         if not secret_key or not cp_id_visible:
@@ -850,7 +864,7 @@ class RealKafkaManager:
         # 1. Validaciones
         if not cp_id or msg_type != 'ENCRYPTED_FERNET' or not content:
             # Se puede retornar el mensaje original si no es de tipo cifrado para un fallback.
-            return None 
+            return mensaje_kafka 
 
         # 2. Obtener la Clave
         clave_secreta = self.get_new_secret_key(cp_id)
