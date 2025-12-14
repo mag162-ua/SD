@@ -232,21 +232,22 @@
                 <div class="dashboard-card">
                     <div class="d-flex justify-content-between align-items-start">
                         <div>
-                            <div class="metric-label">Energía Total</div>
-                            <div class="metric-value" id="total-energy">0 kWh</div>
+                            <div class="metric-label">Conductores</div>
+                            <div class="metric-value" id="total-drivers">0</div>
                         </div>
-                        <div class="metric-icon icon-purple"><i class="fa-solid fa-plug-circle-bolt"></i></div>
+                        <div class="metric-icon icon-purple"><i class="fa-solid fa-users"></i></div>
                     </div>
                 </div>
             </div>
+
             <div class="col-md-6 col-lg-3">
                 <div class="dashboard-card">
                     <div class="d-flex justify-content-between align-items-start">
                         <div>
-                            <div class="metric-label">Ingresos Totales</div>
-                            <div class="metric-value" id="total-revenue">0 €</div>
+                            <div class="metric-label">Atención Requerida</div>
+                            <div class="metric-value" id="total-alerts">0</div>
                         </div>
-                        <div class="metric-icon icon-orange"><i class="fa-solid fa-euro-sign"></i></div>
+                        <div class="metric-icon icon-orange"><i class="fa-solid fa-triangle-exclamation"></i></div>
                     </div>
                 </div>
             </div>
@@ -385,6 +386,8 @@
         function renderData(data) {
             const cps = data.charging_points || [];
             
+            let alertCount = 0;
+
             let activeCount = 0;
             let totalEnergy = 0;
             let totalRevenue = 0;
@@ -405,6 +408,9 @@
 
             cps.forEach(cp => {
                 if (cp.status === 'ACTIVADO' || cp.status === 'SUMINISTRANDO') activeCount++;
+                if (['AVERIADO', 'FAILED', 'DESCONECTADO', 'PARADO'].includes(cp.status)) {
+                    alertCount++;
+                }
                 totalEnergy += (cp.total_energy_supplied || 0);
                 totalRevenue += (cp.total_revenue || 0);
 
@@ -429,8 +435,8 @@
                     ? `<span class="fw-bold text-primary">${(cp.current_consumption).toFixed(2)} kW</span>` 
                     : '<span class="text-secondary">-</span>';
 
-                const sessionHtml = (cp.current_amount > 0)
-                    ? `<div class="fw-bold text-dark">€${(cp.current_amount).toFixed(2)}</div><div class="text-sub">${cp.driver_id || 'Anon'}</div>`
+                const sessionHtml = (cp.status === 'SUMINISTRANDO' || cp.current_amount > 0)
+                    ? `<div class="fw-bold text-dark"><i class="fa-solid fa-user me-1"></i> ${cp.driver_id || 'Desconocido'}</div>`
                     : '<span class="text-secondary">-</span>';
 
                 // Lógica Botones
@@ -527,8 +533,9 @@
             // Update Counters
             document.getElementById('total-cps').innerText = cps.length;
             document.getElementById('active-cps').innerText = activeCount;
-            document.getElementById('total-energy').innerText = totalEnergy.toFixed(1) + ' kWh';
-            document.getElementById('total-revenue').innerText = totalRevenue.toFixed(2) + ' €';
+            const driversCount = (data.drivers || []).length;
+            document.getElementById('total-drivers').innerText = driversCount;
+            document.getElementById('total-alerts').innerText = alertCount;
         }
 
         function stopCP(cpId) {

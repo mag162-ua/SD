@@ -127,9 +127,12 @@ services:
 
   weather:
     image: python:3.9-slim
+    container_name: ev_charging-weather
     volumes:
       - ./weather/app:/app
     working_dir: /app
+    stdin_open: true
+    tty: true
     command: sh -c "pip install requests && python -u /app/EV_W.py"
     environment:
       - CENTRAL_URL=http://api_central:8090/api/weather
