@@ -80,7 +80,8 @@ class ChargingPoint:
         self.supply_ending = False  
         self.supply_ended_time = None
         self.secret_key = None
-    
+        self.weather_alert_active = False
+
     def parse(self):
         """Convierte el CP a diccionario para serialización"""
         return {
@@ -112,7 +113,8 @@ class ChargingPoint:
         cp.total_revenue = data.get('total_revenue', 0.0)
         cp.registration_date = data.get('registration_date', datetime.now().isoformat())
         cp.secret_key = data.get('secret_key', None)
-        
+        cp.weather_alert_active = data.get('weather_alert_active', False)
+
         if data['last_heartbeat']:
             cp.last_heartbeat = datetime.fromisoformat(data['last_heartbeat'])
         
@@ -1159,6 +1161,12 @@ class SocketServer:
                 existing_cp.last_heartbeat = datetime.now()
                 existing_cp.status = "ACTIVADO"  # ACTIVADO al reconectar
                 
+                if existing_cp.weather_alert_active:
+                    existing_cp.status = "AVERIADO"
+                    logger.warning(f"❄️ CP {cp_id} reconectado pero mantenido en AVERIADO por alerta climática activa")
+                else:
+                    existing_cp.status = "ACTIVADO"
+
                 # Guardar cambios
                 self.central.database.save_charging_point(existing_cp)
                 
@@ -1216,8 +1224,13 @@ class SocketServer:
                 # SOLO cambiar si DESCONECTADO
                 if cp.status == "DESCONECTADO": # or cp.status == "AVERIADO": #(cambiado por weather)
                     ip_cliente = client_socket.getpeername()[0] if client_socket else "Unknown"
-                    self.central.update_cp_status(cp_id, "ACTIVADO", source_ip=ip_cliente)
-                    logger.info(f"🔄 CP {cp_id} reactivado - Estado cambiado a ACTIVADO")
+                    
+                    nuevo_estado = "ACTIVADO"
+                    if cp.weather_alert_active:
+                        nuevo_estado = "AVERIADO"
+
+                    self.central.update_cp_status(cp_id, nuevo_estado, source_ip=ip_cliente)
+                    #logger.info(f"🔄 CP {cp_id} reactivado - Estado cambiado a ACTIVADO")
                     status_changed = True
                 
                 # Enviar respuesta simple
@@ -1957,17 +1970,32 @@ class EVCentral:
                 return
 
             if command == 'FAILURE':
-                logger.warning(f"❄️ ALERTA RECIBIDA: Poniendo CP {cp_id} en AVERIADO. Razón: {reason}")
+                source = message.get('source')
+                if source == 'api_weather':
+                    cp.weather_alert_active = True
+                    logger.warning(f"❄️ ALERTA RECIBIDA: Poniendo CP {cp_id} en AVERIADO. Razón: {reason}")
                 # Esto actualiza la variable en memoria Y la Base de Datos PostgreSQL
-                self.update_cp_status(cp_id, "AVERIADO", source_ip=real_ip)
-                
                 # Opcional: Si estaba cargando, forzar parada
                 if cp.status == "SUMINISTRANDO":
                     self.handle_charging_failure(cp_id, reason)
 
+                self.update_cp_status(cp_id, "AVERIADO", source_ip=real_ip)
+
             elif command == 'RESUME':
-                logger.info(f"☀️ RESTABLECIMIENTO: Poniendo CP {cp_id} en ACTIVADO")
-                self.update_cp_status(cp_id, "ACTIVADO", source_ip=real_ip)
+                source = message.get('source')
+
+                if source == 'api_weather':
+                    logger.info(f"☀️ RESTABLECIMIENTO CLIMÁTICO: Poniendo CP {cp_id} en ACTIVADO")
+                    cp.weather_alert_active = False # Quitamos el bloqueo
+                    self.update_cp_status(cp_id, "ACTIVADO", source_ip=real_ip)
+                else:
+                    # ¡OJO! Si hay alerta climática, IGNORAMOS al mecánico
+                    if cp.weather_alert_active:
+                        logger.warning(f"🛡️ BLOQUEO DE SEGURIDAD: Se ignoró orden RESUME manual en CP {cp_id} porque persiste la alerta climática.")
+                        # Opcional: Podrías enviar un mensaje de vuelta diciendo "Denegado por clima"
+                    else:
+                        logger.info(f"🔧 REPARACIÓN MANUAL: Poniendo CP {cp_id} en ACTIVADO")
+                        self.update_cp_status(cp_id, "ACTIVADO", source_ip=real_ip)
 
             elif command == 'STOP':
                 logger.info(f"🛑 STOP Remoto recibido para CP {cp_id}")
@@ -2280,6 +2308,10 @@ class EVCentral:
             
             current_flow_rate = 1.0
             
+            if cp.status == "AVERIADO":
+                logger.warning(f"⚠️ Ignorando flujo de energía en CP {cp_id} porque está AVERIADO")
+                return
+
             if cp.status != "PARADO":
                 self.update_cp_status(
                     cp_id=cp_id,
