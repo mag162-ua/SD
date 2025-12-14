@@ -96,12 +96,15 @@ services:
       - DB_NAME=ev_db
       - DB_USER=user
       - DB_PASSWORD=password
+      - API_REGISTRY_TOKEN=TU_TOKEN_SECRETO_LARGO_E_IRREPETIBLE
     depends_on:
       postgres:
         condition: service_healthy
     networks:
       - kafka-network
     command: ["tail", "-f", "/dev/null"]
+    volumes:
+      - ./ssl:/app/ssl
 
   api_central:
       build: 
@@ -174,9 +177,12 @@ services:
       - LANG=C.UTF-8
       - LC_ALL=C.UTF-8
       - REGISTRY_URL=https://registry:8080
+      - API_REGISTRY_TOKEN=TU_TOKEN_SECRETO_LARGO_E_IRREPETIBLE
+      - REGISTRY_CERT_PATH=/app/ssl/cert.crt
     volumes:
       - ./cp_claves:/app/cp_claves
       - ./ciudades:/app/ciudades
+      - ./ssl:/app/ssl
     command: ["tail", "-f", "/dev/null"]
 
   driver:
