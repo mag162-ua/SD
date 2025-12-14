@@ -606,7 +606,7 @@ class EV_Driver:
             #print(f"⏳ Tiempo estimado restante: {remaining_minutes:02d}:{remaining_seconds:02d}")
         
         # Costo por minuto
-        if cost_per_minute > 0:
+        #if cost_per_minute > 0:
             #print(f"💶 Costo por minuto: €{cost_per_minute:.3f}")
         
         # Barra de progreso simple
@@ -950,3 +950,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
