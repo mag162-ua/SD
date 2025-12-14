@@ -1,0 +1,10 @@
+Moscow,RU
+Oslo,NO
+Montreal,CA
+New York,US
+London,GB
+Tokyo,JP
+Madrid,ES
+Sydney,AU
+Rio de Janeiro,BR
+Mexico City,MX

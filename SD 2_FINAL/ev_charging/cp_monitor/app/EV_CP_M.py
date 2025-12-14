@@ -1,0 +1,430 @@
+# EV_CP_M.py
+import os                      # Importa el módulo 'os' para interactuar con el sistema operativo (ej. variables de entorno).
+import sys                     # Importa el módulo 'sys' para acceder a variables y funciones específicas del intérprete (ej. argumentos de línea de comandos).
+import time                    # Importa el módulo 'time' para funciones relacionadas con el tiempo (ej. pausas con time.sleep()).
+import threading               # Importa el módulo 'threading' para ejecutar tareas concurrentemente (ej. el consumidor de Kafka en un hilo separado).
+import socket                  # Importa el módulo 'socket' para la comunicación en red (ej. conexiones TCP).
+import threading               # Necesario para usar la funcionalidad de hilos
+import enum                    # Necesario para definir enumeraciones
+from faker import Faker        # Importamos la librería Faker
+import random
+import requests
+import json
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+if os.name != 'nt':
+    import select
+    import tty
+    import termios
+else:
+    import msvcrt
+
+TIMEOUT = 4  # Tiempo de espera para las conexiones en segundos
+
+class MENSAJES_CP_M(enum.Enum):
+    REGISTER_CP = "REGISTER_CP"
+    REGISTER_OK = "REGISTER_OK"
+    REGISTER_KO = "REGISTER_KO"
+    STATUS_E = "STATUS_E"
+    STATUS_OK = "STATUS_OK"
+    STATUS_KO = "STATUS_KO"
+    OK_CP = "CP_OK"
+    KO_CP = "CP_KO"
+    ERROR_COMM = "ERROR_COMM"
+    ERROR_REG = "ERROR#CP_no_registrado#SOLICITAR_REGISTRO"
+    ERROR_AUTH = "ERROR#Clave_secreta_inválida"
+
+class EV_CP_M:
+
+    REGISTRY_URL=os.getenv('REGISTRY_URL', "https://registry:8080")  # URL del registro desde variable de entorno
+    RUTA_CIUDADES = "/app/ciudades/"  # Ruta de las ciudades, se asume que está en el contenedor
+    RUTA_CLAVES = "/app/cp_claves/"      # Ruta para almacenar las claves secretas
+
+    API_REGISTRY_TOKEN = os.getenv('API_REGISTRY_TOKEN', "TU_SECRETO_DEFAULT_MUY_LARGO")
+    REGISTRY_CERT_PATH = os.getenv('REGISTRY_CERT_PATH', "/app/security/registry_cert.crt")
+
+    def __init__(self, IP_PUERTO_E, IP_PUERTO_C, ID, LOCALIZACION, KWH):
+        self.IP_E, self.PUERTO_E = IP_PUERTO_E.split(':')      # Dirección IP y puerto del emulador EV
+        self.IP_C, self.PUERTO_C = IP_PUERTO_C.split(':')      # Dirección IP y puerto del emulador CP
+        self.ID = ID                        # Identificador del monitor 
+        self.localizacion = LOCALIZACION    # Variable para almacenar la localización del monitor
+        self.kwh = KWH                      # Variable para almacenar los kWh del monitor
+        self.connect_engine = False          # Estado inicial del engine
+        self.socket_central = None          # Socket para la comunicación con la central
+        self.autorizado = False             # Estado de autorización inicial
+        self.registrado = False            # Estado de registro inicial
+        self.clave_acceso = ""             # Clave secreta para la comunicación segura
+        print(f"Monitor {self.ID} inicializado con IP_PUERTO_E: {IP_PUERTO_E}, IP_PUERTO_C: {IP_PUERTO_C}")
+    
+    def ciudad():
+        if os.path.exists(f"{EV_CP_M.RUTA_CIUDADES}ciudades.txt"):
+            try:
+                with open(f"{EV_CP_M.RUTA_CIUDADES}ciudades.txt", "r") as archivo:
+                    ciudades = [linea.strip() for linea in archivo if linea.strip()]  # Leer ciudades del archivo
+                    if not ciudades:
+                        print("No se encontraron ciudades en el archivo.")
+                        return "Desconocida"
+                    ciudad = random.choice(ciudades)  # Selecciona una ciudad aleatoria
+                    print(f"Ciudad seleccionada: {ciudad}")
+                    return ciudad
+            except Exception as e:
+                print(f"Error al cargar las ciudades: {e}")
+                return "Desconocida"
+        else:
+            print(f"Archivo de ciudades no encontrado en {EV_CP_M.RUTA_CIUDADES}ciudades.json")
+            return "Desconocida"
+    
+    def almacenar_clave_acceso(self, clave):
+        clave = {
+            "ID": self.ID,
+            "secret_key": clave
+        }
+        try:
+            with open(EV_CP_M.RUTA_CLAVES+f"clave_{self.ID}.json", "w") as archivo:
+                json.dump(clave, archivo, indent=4)
+            print(f"Clave de acceso almacenada en {EV_CP_M.RUTA_CLAVES}/clave_{self.ID}")
+        except Exception as e:
+            print(f"Error al almacenar la clave de acceso: {e}")
+    
+    def eliminar_clave_acceso(self):
+        try:
+            ruta_clave = EV_CP_M.RUTA_CLAVES+f"clave_{self.ID}.json"
+            if os.path.exists(ruta_clave):
+                os.remove(ruta_clave)
+                print(f"Clave de acceso eliminada: {ruta_clave}")
+            else:
+                print(f"No se encontró la clave de acceso para eliminar: {ruta_clave}")
+        except Exception as e:
+            print(f"Error al eliminar la clave de acceso: {e}")
+
+    def dar_de_alta(self):
+        # Lógica para obtener la clave de acceso del registro
+        if not EV_CP_M.REGISTRY_URL:
+                print("ERROR: La variable de entorno REGISTRY_URL no está configurada.")
+                return None
+        
+        registry_endpoint = f"{EV_CP_M.REGISTRY_URL}/register"
+        headers = {
+            "Authorization": f"Bearer {EV_CP_M.API_REGISTRY_TOKEN}",
+            "Content-Type": "application/json"
+        }  
+        datos = {
+            "id": self.ID,
+            "location": self.localizacion,
+            "price_per_kwh": self.kwh,
+        }
+
+        try:
+
+            print(f"Intentando registrar el CP {self.ID} en el Registry {EV_CP_M.REGISTRY_URL}...")
+
+            response = requests.post(
+                registry_endpoint, 
+                json=datos, 
+                headers=headers,
+                timeout=TIMEOUT, 
+                verify=False
+            )
+            response.raise_for_status()
+
+            data = response.json()
+            secret_key = data.get('secret_key')
+
+            if secret_key:
+                print(f"Clave secreta obtenida del Registry para {self.ID}.")
+                self.clave_acceso = secret_key
+                self.localizacion = data["location"]
+                self.kwh = data["price_per_kwh"]
+                self.registrado = True
+                return True
+            else:
+                print("Error: El Registry no devolvió la 'secret_key' en la respuesta.")
+                return False
+
+        except requests.exceptions.RequestException as e:
+            print(f"ERROR: Fallo de comunicación con el Registry ({registry_endpoint}): {e}")
+            return False 
+
+    def dar_de_baja(self):
+        # Lógica para dar de baja el CP en el registro
+        if not EV_CP_M.REGISTRY_URL:
+                print("ERROR: La variable de entorno REGISTRY_URL no está configurada.")
+                return None
+        
+        registry_endpoint = f"{EV_CP_M.REGISTRY_URL}/deregister"
+        headers = {
+            "Authorization": f"Bearer {EV_CP_M.API_REGISTRY_TOKEN}",
+            "Content-Type": "application/json"
+        }
+        datos = {
+            "id": self.ID
+        }
+
+        try:
+
+            print(f"Intentando dar de baja al CP {self.ID} en el Registry {EV_CP_M.REGISTRY_URL}...")
+
+            response = requests.delete(
+                registry_endpoint, 
+                json=datos, 
+                headers=headers, 
+                timeout=TIMEOUT, 
+                verify=False
+            )
+            response.raise_for_status()
+
+            data = response.json()
+            if response.status_code == 200:
+                print(f"CP {self.ID} dado de baja correctamente en el Registry.")
+                self.eliminar_clave_acceso()
+                self.registrado = False
+                return True
+            else:
+                print(f"Error al dar de baja el CP {self.ID}: {data.get('error', 'Error desconocido')}")
+                return False
+            
+        except requests.exceptions.RequestException as e:
+            print(f"ERROR: Fallo de comunicación con el Registry ({registry_endpoint}): {e}")
+            return False 
+
+    def enviar_mensaje_socket_transitiva(self, IP, PUERTO,mensaje): # Comunicación socket transitiva, envio y cierre de socket
+        print(f"Enviando mensaje transitiva a {IP}:{PUERTO} : {mensaje}")
+        try: # Intentar enviar el mensaje y recibir la respuesta
+            socket_t = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            socket_t.settimeout(TIMEOUT)
+            socket_t.connect((IP, int(PUERTO)))
+            socket_t.sendall(mensaje.encode())
+
+            respuesta = socket_t.recv(1024).decode('utf-8').strip()
+            if not respuesta:
+                raise Exception("No hubo respuesta / conexión finalizada")
+            return respuesta
+        
+        except Exception as e:
+            print(f"Error {e} envio a IP: {IP}, PUERTO: {PUERTO}, MENSAJE: {mensaje}")
+            return MENSAJES_CP_M.ERROR_COMM.value
+        
+        finally: # Asegurarse de cerrar el socket
+            socket_t.close()
+    
+    def enviar_mensaje_socket_persistente(self, IP, PUERTO,mensaje): # Comunicación socket persistente, mantiene el socket abierto
+        print(f"Enviando mensaje persistente a {IP}:{PUERTO} : {mensaje}")
+        try: # Intentar enviar el mensaje y recibir la respuesta
+            if self.socket_central is None: # Crear y conectar el socket si no está ya conectado
+                self.socket_central = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.socket_central.connect((IP, int(PUERTO)))
+            
+            self.socket_central.sendall(mensaje.encode())
+            respuesta = self.socket_central.recv(1024).decode('utf-8').strip()
+            return respuesta
+        
+        except Exception as e: # Manejar errores y cerrar el socket si hay un problema
+            print(f"Error {e} envio persistente a IP: {IP}, PUERTO: {PUERTO}, MENSAJE: {mensaje}")
+            if self.socket_central:
+                self.socket_central.close()
+                self.socket_central = None
+            return MENSAJES_CP_M.ERROR_COMM.value
+
+    def registrarse_central(self): # Registro del monitor en la central
+        print(f"Tratando de registrarse en la central en {self.IP_C}:{self.PUERTO_C}...")
+        
+        # Enviar mensaje de registro a la central
+        respuesta = self.enviar_mensaje_socket_persistente(self.IP_C, self.PUERTO_C, MENSAJES_CP_M.REGISTER_CP.value+f"#{self.ID}#{self.localizacion}#{self.kwh}#{self.clave_acceso}")
+        
+        # Procesar la respuesta de la central
+        if respuesta.startswith(MENSAJES_CP_M.REGISTER_OK.value):
+            self.almacenar_clave_acceso(respuesta.split('#')[1])
+            print(f"Monitor {self.ID} registrado exitosamente en la central.")
+            self.autorizado = True
+            return True
+        
+        if respuesta == MENSAJES_CP_M.ERROR_AUTH.value+f"{self.ID}": # Clave secreta inválida
+            print(f"🚨 Clave secreta inválida para el CP {self.ID}. Iniciando re-registro...")
+            self.autorizado = False
+            return False
+        
+        elif respuesta == "ERROR_COMM" or respuesta == MENSAJES_CP_M.REGISTER_KO.value:
+            print(f"Error al registrar el monitor {self.ID} en la central: {respuesta}")
+            self.autorizado = False
+            return False
+    
+    def escuchar_central(self): # Escuchar mensajes de la central
+        print(f"Escuchando mensajes de la central en {self.IP_C}:{self.PUERTO_C}...")
+
+        if self.socket_central is None: # Verificar que el socket esté inicializado
+            print("Socket de la central no está inicializado.")
+            return
+
+        while True: # Bucle infinito para escuchar mensajes
+            try:
+                mensaje = self.socket_central.recv(1024).decode('utf-8').strip()
+                if mensaje: # Procesar el mensaje recibido
+                    print(f"Monitor {self.ID} recibió mensaje de la central: {mensaje}")
+
+                else: 
+                    print("Conexión cerrada por la central.")
+                    self.socket_central.close()
+                    self.socket_central = None
+                    break
+            
+            except Exception as e:
+                print(f"Error al recibir mensaje de la central: {e}")
+                break
+    
+    def enviar_baja_central(self): # Enviar mensaje de baja a la central
+        print(f"Enviando mensaje de baja a la central en {self.IP_C}:{self.PUERTO_C}...")
+        respuesta = self.enviar_mensaje_socket_transitiva(self.IP_C, self.PUERTO_C, f"DEREGISTER_CP#{self.ID}")
+        if respuesta == "DEREGISTER_OK":
+            print(f"CP {self.ID} dado de baja correctamente en la central.")
+            self.autorizado = False
+            return True
+        else:
+            print(f"Error al dar de baja el CP {self.ID} en la central: {respuesta}")
+            return False
+         
+    def comprobar_estado_engine(self): 
+        print(f"🔍 Iniciando comprobación de estado del Engine {self.ID}...")
+        
+        socket_engine = None
+
+        while True:
+            try:
+                if socket_engine is None:
+                    try:
+                        print(f"🔌 Conectando al Engine en {self.IP_E}:{self.PUERTO_E}...")
+                        socket_engine = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        socket_engine.settimeout(5) # Timeout razonable
+                        socket_engine.connect((self.IP_E, int(self.PUERTO_E)))
+                        print("✅ Conectado al Engine.")
+                    except Exception as e:
+                        print(f"❌ Error de conexión con Engine: {e}")
+                        socket_engine = None
+                        if self.autorizado:
+                            self.enviar_mensaje_socket_transitiva(self.IP_C, self.PUERTO_C, MENSAJES_CP_M.KO_CP.value+f"#{self.ID}")
+                        time.sleep(2)
+                        continue # Reintentar en el siguiente ciclo
+
+                msg = MENSAJES_CP_M.STATUS_E.value + f"#{self.ID}"
+                socket_engine.sendall(msg.encode())
+
+                respuesta = socket_engine.recv(1024).decode('utf-8').strip()
+
+                if not respuesta:
+                    raise ConnectionResetError("Conexión cerrada por el Engine")
+
+                if respuesta == MENSAJES_CP_M.STATUS_OK.value:
+                    print(f"✅ Engine reporta OK")
+                    if self.autorizado:
+                        self.enviar_mensaje_socket_transitiva(self.IP_C, self.PUERTO_C, MENSAJES_CP_M.OK_CP.value+f"#{self.ID}")
+                        self.connect_engine = True
+
+
+                elif respuesta == MENSAJES_CP_M.STATUS_KO.value:
+                    print(f"🚨 Engine reporta AVERÍA")
+                    if self.autorizado:
+                        self.enviar_mensaje_socket_transitiva(self.IP_C, self.PUERTO_C, MENSAJES_CP_M.KO_CP.value+f"#{self.ID}")
+                        self.connect_engine = True # Hay conexión, pero el engine dice que está KO
+
+            except (socket.timeout, socket.error, ConnectionResetError, BrokenPipeError) as e:
+                print(f"⚠️ Pérdida de conexión con Engine: {e}")
+                if socket_engine:
+                    socket_engine.close()
+                socket_engine = None
+                self.connect_engine = False
+                # Notificar a la central que el CP no responde
+                if self.autorizado:
+                    self.enviar_mensaje_socket_transitiva(self.IP_C, self.PUERTO_C, MENSAJES_CP_M.KO_CP.value+f"#{self.ID}")
+            
+            except Exception as e:
+                print(f"❌ Error inesperado en monitor: {e}")
+                if socket_engine:
+                    socket_engine.close() 
+                socket_engine = None
+
+            # Espera entre comprobaciones
+            time.sleep(1)
+
+    def mostrar_menu(self): #Menú del Engine
+        while True:
+
+            os.system('cls' if os.name == 'nt' else 'clear') #Limpiar pantalla
+            
+            print(f"\n---{self.registrado} {self.autorizado} Menú del monitor {self.ID} - {self.ciudad} - {self.kwh}€/KWh---")
+            if self.registrado:
+                print("1. Dar de baja el CP") #Opción para desautorizar
+            else:
+                print("1. Dar de alta el CP") #Opción para autorizar
+
+            print("2. Salir") #Salir del menú
+            print("---------------------------")
+
+            respuesta = None # Esperar entrada sin bloquear
+            if os.name == 'nt': # Solo intentar usar msvcrt en Windows
+                if msvcrt.kbhit():
+                    respuesta = msvcrt.getch().decode()
+            else: # En sistemas Unix, usar select
+                if select.select([sys.stdin], [], [], 0) == ([sys.stdin], [], []):
+                    # Si hay datos, leemos la línea completa.
+                    respuesta = sys.stdin.readline().strip()
+            self.responder_menu(respuesta)
+            time.sleep(3)
+    
+    def responder_menu(self, respuesta): # Responder a la entrada del menú
+        if respuesta == '1':
+            if self.registrado:
+                print(f"CP {self.ID} dado de baja...")
+                if self.dar_de_baja():
+                    self.enviar_baja_central()
+                    print(f"CP {self.ID} dado de baja correctamente.")
+
+            else:
+                print(f"CP {self.ID} dado de alta...")
+                # LLAMAR A REGISTRY PARA DAR DE ALTA EL CP
+                if self.dar_de_alta():
+                    if self.registrarse_central():
+                        #self.registrado = True
+                        print(f"CP {self.ID} dado de alta correctamente.")
+                        listener_thread = threading.Thread(target=self.escuchar_central, daemon=True)
+                        listener_thread.start()
+
+        elif respuesta == '2':
+            print("Saliendo del menú...")
+            self.limpiar_y_salir()
+            return
+        else:
+            if respuesta is not None:
+                print("Opción no válida. Intente de nuevo.")
+
+    def limpiar_y_salir(self): #Limpiar recursos y salir del programa
+        print("\nIniciando limpieza de recursos...")
+        try: # Cerrar el socket de la central
+            if hasattr(self, 'socket_central') and self.socket_central:
+                self.socket_central.close()
+        except Exception as e:
+            print(f"[Monitor Shutdown] Error al cerrar recursos: {e}")
+
+        print("Proceso terminado.")
+        sys.exit(0)
+
+    def run(self): 
+        print(f"Monitor {self.ID} corriendo...")
+        
+        check_thread = threading.Thread(target=self.comprobar_estado_engine, daemon=True)
+        check_thread.start()
+
+        while True:
+            self.mostrar_menu()
+
+if __name__ == "__main__":
+    if len(sys.argv) != 4: # Comprobar argumentos
+        print("Uso: python ev_cp_monitor.py <IP_ENGINE:PUERTO_ENGINE> <IP_CENTRAL:PUERTO_CENTRAL> <ID>")
+        sys.exit(1)
+    
+    #faker = Faker()
+    monitor = EV_CP_M(sys.argv[1], sys.argv[2], sys.argv[3], EV_CP_M.ciudad(), round(random.random(), 2))
+
+    try:
+        monitor.run()
+    except KeyboardInterrupt:
+        print("Monitor detenido por el usuario.")
+        sys.exit(0)
