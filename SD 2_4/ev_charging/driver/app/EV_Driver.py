@@ -592,8 +592,8 @@ class EV_Driver:
         # Información principal
         print(f"🔋 Energía suministrada: {energy_delivered:.2f} kWh")
         print(f"💰 Importe actual: €{current_amount:.2f}")
-        #print(f"📈 Caudal instantáneo: {flow_rate:.1f} kW")
-        #print(f"⚡ Potencia media: {avg_power:.1f} kW")
+        print(f"📈 Caudal instantáneo: {flow_rate:.1f} kW")
+        print(f"⚡ Potencia media: {avg_power:.1f} kW")
         
         # Estadísticas de tiempo
         elapsed_minutes = int(elapsed_time // 60)
@@ -603,11 +603,11 @@ class EV_Driver:
         if remaining_time > 0 and remaining_time < 3600:  # Mostrar solo si razonable
             remaining_minutes = int(remaining_time // 60)
             remaining_seconds = int(remaining_time % 60)
-            #print(f"⏳ Tiempo estimado restante: {remaining_minutes:02d}:{remaining_seconds:02d}")
+            print(f"⏳ Tiempo estimado restante: {remaining_minutes:02d}:{remaining_seconds:02d}")
         
         # Costo por minuto
         if cost_per_minute > 0:
-            #print(f"💶 Costo por minuto: €{cost_per_minute:.3f}")
+            print(f"💶 Costo por minuto: €{cost_per_minute:.3f}")
         
         # Barra de progreso simple
         progress = min(100, (energy_delivered / 50) * 100)
@@ -678,7 +678,7 @@ class EV_Driver:
         print(f"📋 ID Transacción: {ticket_data.get('ticket_id', 'N/A')}")
         print(f"{'-'*60}")
         print(f"⚡ Energía Consumida: {ticket_data.get('energy_consumed', 0):.2f} kWh")
-        #print(f"💰 Precio por kWh: €{ticket_data.get('price_per_kwh', 0):.3f}")
+        print(f"💰 Precio por kWh: €{ticket_data.get('price_per_kwh', 0):.3f}")
         print(f"💵 Importe Total: €{ticket_data.get('amount', 0):.2f}")
         print(f"{'-'*60}")
         print(f"✅ CARGA COMPLETADA EXITOSAMENTE")
@@ -695,7 +695,7 @@ class EV_Driver:
         print(f"📋 ID Transacción: {ticket_data.get('ticket_id', 'N/A')}")
         print(f"{'-'*60}")
         print(f"⚡ Energía Consumida: {ticket_data.get('energy_consumed', 0):.2f} kWh")
-        #print(f"💰 Precio por kWh: €{ticket_data.get('price_per_kwh', 0):.3f}")
+        print(f"💰 Precio por kWh: €{ticket_data.get('price_per_kwh', 0):.3f}")
         print(f"💵 Importe Total: €{ticket_data.get('amount', 0):.2f}")
         print(f"❌ Razón de Cancelación: {ticket_data.get('cancellation_reason', 'No especificada')}")
         print(f"{'-'*60}")

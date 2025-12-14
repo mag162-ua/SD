@@ -431,16 +431,6 @@
                     pillClass = 'stopped'; icon = 'fa-hand';
                 }
 
-                let tempHtml = '';
-                if (cp.temperature !== null && cp.temperature !== undefined) {
-                    let tempColor = 'text-secondary';
-                    if (cp.temperature < 5) tempColor = 'text-info'; // Frío
-                    if (cp.temperature > 30) tempColor = 'text-warning'; // Calor
-                    if (cp.temperature < 0) tempColor = 'text-danger fw-bold'; // Alerta
-                    
-                    tempHtml = `<span class="badge bg-light border ${tempColor} ms-2"><i class="fa-solid fa-temperature-half me-1"></i>${cp.temperature}°C</span>`;
-                }
-
                 // Datos dinámicos
                 const powerHtml = (cp.status === 'SUMINISTRANDO' && cp.current_consumption > 0) 
                     ? `<span class="fw-bold text-primary">${(cp.current_consumption).toFixed(2)} kW</span>` 
@@ -461,9 +451,7 @@
                                 <div class="avatar-circle bg-white border"><i class="fa-solid fa-charging-station"></i></div>
                                 <div>
                                     <div class="fw-bold text-dark">CP-${cp.cp_id}</div>
-                                    <div class="text-sub d-flex align-items-center">
-                                        ${cp.location}
-                                        ${tempHtml} </div>
+                                    <div class="text-sub">${cp.location}</div>
                                 </div>
                             </div>
                         </td>
@@ -484,7 +472,6 @@
                         </td>
                     </tr>
                 `;
-
                 tbody.innerHTML += row;
             });
 
