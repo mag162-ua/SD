@@ -7,7 +7,6 @@ from flask import Flask, request, jsonify
 import psycopg2 
 from psycopg2 import sql 
 from psycopg2 import OperationalError
-from functools import wraps
 
 # -------------------------------------------------------------------------
 # CONFIGURACIÓN DE LA BASE DE DATOS
@@ -19,7 +18,6 @@ DB_NAME = os.environ.get("DB_NAME", "ev_db")
 DB_USER = os.environ.get("DB_USER", "user")
 DB_PASSWORD = os.environ.get("DB_PASSWORD", "password")
 DB_PORT = os.environ.get("DB_PORT", "5432")
-API_REGISTRY_TOKEN = os.environ.get("API_REGISTRY_TOKEN", "TU_SECRETO_DEFAULT_MUY_LARGO")
 
 app = Flask(__name__)
 
@@ -88,29 +86,6 @@ def create_table_if_not_exists():
 
 from psycopg2 import sql, extras
 # Asegúrate de importar extras si usas fetchone() con diccionario
-
-def token_required(f):
-    """Decorador para verificar que el request contiene un token válido."""
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        auth_header = request.headers.get('Authorization')
-
-        if not auth_header:
-            return jsonify({"error": "Authorization header missing"}), 401
-        
-        try:
-            scheme, token = auth_header.split()
-        except ValueError:
-            return jsonify({"error": "Invalid Authorization header format. Expected: Bearer <token>"}), 401
-            
-        # Comprobar si el token coincide con el secreto
-        if scheme.lower() != 'bearer' or token != API_REGISTRY_TOKEN:
-            # Registrar intento de acceso fallido aquí si fuera necesario
-            return jsonify({"error": "Invalid token"}), 403
-
-        return f(*args, **kwargs)
-
-    return decorated
 
 def register_cp_in_db(cp_id, secret_key, location, price_per_kwh):
     """
@@ -186,7 +161,6 @@ def deregister_cp_from_db(cp_id):
 # -------------------------------------------------------------------------
 
 @app.route('/register', methods=['POST'])
-@token_required
 def register_cp():
     cp_data = request.get_json()
     cp_id = cp_data.get('id')
@@ -208,7 +182,6 @@ def register_cp():
         return jsonify({"error": "DB registration failed"}), 500
 
 @app.route('/deregister', methods=['DELETE'])
-@token_required
 def deregister_cp():
     cp_data = request.get_json()
     cp_id = cp_data.get('id')
@@ -232,9 +205,6 @@ def health_check():
 if __name__ == '__main__':
     # Intentar asegurar que la tabla existe antes de iniciar el servidor
     create_table_if_not_exists()
-
-    CERT_PATH = '/app/ssl/cert.crt'
-    KEY_PATH = '/app/ssl/key.key'
     
     # Asume que el Registry necesita certificados (SSL adhoc)
-    app.run(host='0.0.0.0', port=8080, ssl_context=(CERT_PATH, KEY_PATH))
+    app.run(host='0.0.0.0', port=8080, ssl_context='adhoc')

@@ -10,8 +10,6 @@ from faker import Faker        # Importamos la librería Faker
 import random
 import requests
 import json
-import urllib3
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 if os.name != 'nt':
     import select
     import tty
@@ -39,9 +37,6 @@ class EV_CP_M:
     REGISTRY_URL=os.getenv('REGISTRY_URL', "https://registry:8080")  # URL del registro desde variable de entorno
     RUTA_CIUDADES = "/app/ciudades/"  # Ruta de las ciudades, se asume que está en el contenedor
     RUTA_CLAVES = "/app/cp_claves/"      # Ruta para almacenar las claves secretas
-
-    API_REGISTRY_TOKEN = os.getenv('API_REGISTRY_TOKEN', "TU_SECRETO_DEFAULT_MUY_LARGO")
-    REGISTRY_CERT_PATH = os.getenv('REGISTRY_CERT_PATH', "/app/security/registry_cert.crt")
 
     def __init__(self, IP_PUERTO_E, IP_PUERTO_C, ID, LOCALIZACION, KWH):
         self.IP_E, self.PUERTO_E = IP_PUERTO_E.split(':')      # Dirección IP y puerto del emulador EV
@@ -103,11 +98,7 @@ class EV_CP_M:
                 print("ERROR: La variable de entorno REGISTRY_URL no está configurada.")
                 return None
         
-        registry_endpoint = f"{EV_CP_M.REGISTRY_URL}/register"
-        headers = {
-            "Authorization": f"Bearer {EV_CP_M.API_REGISTRY_TOKEN}",
-            "Content-Type": "application/json"
-        }  
+        registry_endpoint = f"{EV_CP_M.REGISTRY_URL}/register"  
         datos = {
             "id": self.ID,
             "location": self.localizacion,
@@ -118,17 +109,11 @@ class EV_CP_M:
 
             print(f"Intentando registrar el CP {self.ID} en el Registry {EV_CP_M.REGISTRY_URL}...")
 
-            response = requests.post(
-                registry_endpoint, 
-                json=datos, 
-                headers=headers,
-                timeout=TIMEOUT, 
-                verify=False
-            )
+            response = requests.post(registry_endpoint, json=datos, timeout=TIMEOUT, verify=False)
             response.raise_for_status()
 
             data = response.json()
-            secret_key = data.get('secret_key')
+            secret_key = data.get('secret_key') #### PREGUNTAR AL PROFESOR SI ESTO VA AQUI O EN OTRO SITIO
 
             if secret_key:
                 print(f"Clave secreta obtenida del Registry para {self.ID}.")
@@ -152,10 +137,6 @@ class EV_CP_M:
                 return None
         
         registry_endpoint = f"{EV_CP_M.REGISTRY_URL}/deregister"
-        headers = {
-            "Authorization": f"Bearer {EV_CP_M.API_REGISTRY_TOKEN}",
-            "Content-Type": "application/json"
-        }
         datos = {
             "id": self.ID
         }
@@ -164,13 +145,7 @@ class EV_CP_M:
 
             print(f"Intentando dar de baja al CP {self.ID} en el Registry {EV_CP_M.REGISTRY_URL}...")
 
-            response = requests.delete(
-                registry_endpoint, 
-                json=datos, 
-                headers=headers, 
-                timeout=TIMEOUT, 
-                verify=False
-            )
+            response = requests.delete(registry_endpoint, json=datos, timeout=TIMEOUT, verify=False)
             response.raise_for_status()
 
             data = response.json()
