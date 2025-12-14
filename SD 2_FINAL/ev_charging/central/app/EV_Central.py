@@ -18,7 +18,7 @@ import base64
 import hashlib
 
 
-# Configuración de logging MEJORADA para Docker
+# Configuración de logging para Docker
 def setup_logging():
     """Configuración logging """
     # Usar variable de entorno o valor por defecto
@@ -87,14 +87,14 @@ class ChargingPoint:
         return {
             'cp_id': self.cp_id,
             'location': self.location,
-            'price_per_kwh': float(self.price_per_kwh), # <--- AÑADIR float()
+            'price_per_kwh': float(self.price_per_kwh), 
             'status': self.status,
-            'current_consumption': float(self.current_consumption), # <--- AÑADIR float()
-            'current_amount': float(self.current_amount), # <--- AÑADIR float()
+            'current_consumption': float(self.current_consumption), 
+            'current_amount': float(self.current_amount), # float()
             'driver_id': self.driver_id,
             'last_heartbeat': self.last_heartbeat.isoformat() if self.last_heartbeat else None,
-            'total_energy_supplied': float(self.total_energy_supplied), # <--- AÑADIR float()
-            'total_revenue': float(self.total_revenue), # <--- AÑADIR float()
+            'total_energy_supplied': float(self.total_energy_supplied),
+            'total_revenue': float(self.total_revenue),
             'registration_date': self.registration_date,
             'last_supply_message': self.last_supply_message.isoformat() if self.last_supply_message else None,
             'supply_ending': self.supply_ending, 
@@ -135,7 +135,7 @@ class DatabaseManager:
         self.drivers = set()
         self.transactions = []
         
-        # Configuración de conexión a PostgreSQL desde variables de entorno
+        # Configuración de conexión a db variables de entorno
         self.db_config = {
             'host': os.getenv('DB_HOST', 'postgres'),
             'database': os.getenv('DB_NAME', 'ev_db'),
@@ -147,13 +147,13 @@ class DatabaseManager:
         # Pool de conexiones
         self.connection_pool = None
         
-        # Intentar conectar con reintentos
+        # Reintentos
         self.connect_with_retries(max_retries=15, retry_interval=3)
         
-        # Inicializar base de datos
+        # Inicializar db
         self.init_database()
         
-        # Cargar datos existentes
+        # Cargar datos
         data_loaded = self.load_data()
         
         if not data_loaded:
@@ -168,7 +168,7 @@ class DatabaseManager:
             try:
                 logger.info(f"🔄 Intentando conectar a PostgreSQL (intento {attempt+1}/{max_retries})...")
                 
-                # Intentar conexión simple primero
+                # Conexión simple
                 test_conn = psycopg2.connect(
                     host=self.db_config['host'],
                     database=self.db_config['database'],
@@ -206,7 +206,7 @@ class DatabaseManager:
         """Obtiene una conexión del pool"""
         try:
             if not self.connection_pool:
-                # Intentar reconectar si el pool no existe
+                # Intentar reconectar si pool no existe
                 self.connect_with_retries(max_retries=3, retry_interval=1)
                 if not self.connection_pool:
                     raise OperationalError("No hay conexión disponible a PostgreSQL")
@@ -236,7 +236,7 @@ class DatabaseManager:
             conn = self.get_connection()
             cursor = conn.cursor()
             
-            # Crear tabla de puntos de carga
+            # Crear tabla de CPs
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS charging_points (
                     cp_id VARCHAR(50) PRIMARY KEY,
@@ -259,7 +259,7 @@ class DatabaseManager:
                 )
             """)
             
-            # Crear tabla de conductores
+            # Crear tabla Drivers
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS drivers (
                     driver_id VARCHAR(50) PRIMARY KEY,
@@ -267,7 +267,7 @@ class DatabaseManager:
                 )
             """)
             
-            # Crear tabla de transacciones
+            # Crear tabla de Transacciones
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS transactions (
                     transaction_id VARCHAR(100) PRIMARY KEY,
@@ -285,7 +285,7 @@ class DatabaseManager:
                 )
             """)
             
-            # Crear tabla de backups (histórico)
+            # Crear tabla de backups
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS backups (
                     backup_id SERIAL PRIMARY KEY,
@@ -335,7 +335,7 @@ class DatabaseManager:
             conn = self.get_connection()
             cursor = conn.cursor(cursor_factory=extras.RealDictCursor)
             
-            # Cargar puntos de carga
+            # Cargar CPs
             cursor.execute("SELECT * FROM charging_points")
             charging_points_data = cursor.fetchall()
 
@@ -351,17 +351,17 @@ class DatabaseManager:
 
                     cp = ChargingPoint.unparse(cp_dict)
                     cp.status = 'DESCONECTADO'  # Reiniciar estado a DESCONECTADO al cargar
-                    cp.socket_connection = None  # No mantener conexiones de socket al cargar
+                    cp.socket_connection = None  # No mantener conexiones socket al cargar
                     self.charging_points[cp.cp_id] = cp
                 except Exception as e:
                     logger.error(f"❌ Error cargando CP {cp_data.get('cp_id', 'desconocido')}: {e}")
             
-            # Cargar conductores
+            # Cargar Drivers
             cursor.execute("SELECT driver_id FROM drivers")
             drivers_data = cursor.fetchall()
             self.drivers = set(driver['driver_id'] for driver in drivers_data)
             
-            # Cargar transacciones (solo para estadísticas, no para memoria)
+            # Cargar Transacciones
             cursor.execute("SELECT COUNT(*) as count FROM transactions")
             transaction_count = cursor.fetchone()['count']
             self.transactions = []  # No cargamos todas las transacciones en memoria
@@ -388,7 +388,7 @@ class DatabaseManager:
             conn = self.get_connection()
             cursor = conn.cursor(cursor_factory=extras.RealDictCursor)
             
-            # Cargar puntos de carga
+            # Cargar CPs
             cursor.execute("SELECT secret_key FROM charging_points where cp_id=%s", (cp_id,))
             
             return secret_key == cursor.fetchone()['secret_key']
@@ -498,13 +498,13 @@ class DatabaseManager:
         try:
             logger.debug("💾 Guardando datos en PostgreSQL...")
             
-            # Guardar todos los puntos de carga
+            # Guardar CPs
             saved_count = 0
             for cp in self.charging_points.values():
                 if self.save_charging_point(cp):
                     saved_count += 1
             
-            # Guardar conductores
+            # Guardar Drivers
             conn = self.get_connection()
             cursor = conn.cursor()
             
@@ -530,7 +530,7 @@ class DatabaseManager:
         existing_cp = self.charging_points.get(cp.cp_id)
         
         if existing_cp:
-            # PERMITIR reemplazo SOLO si DESCONECTADO
+            # Reemplazo SOLO si DESCONECTADO
             if existing_cp.status == "DESCONECTADO":
                 logger.info(f"🔄 Reemplazando CP {cp.cp_id} en estado DESCONECTADO")
                 self.charging_points[cp.cp_id] = cp
@@ -629,7 +629,7 @@ class DatabaseManager:
         try:
             logger.info("📦 Creando backup en PostgreSQL...")
             self.add_audit_log("SISTEMA", "BACKUP_CREADO", f"Tipo: {backup_type} - {description or ''}")
-            # Preparar datos para el backup
+            # Preparar datos para backup
             backup_data = {
                 'charging_points': [cp.parse() for cp in self.charging_points.values()],
                 'drivers': list(self.drivers),
@@ -689,11 +689,11 @@ class DatabaseManager:
             self.add_audit_log("SISTEMA", "RESTAURACION_BACKUP", f"Sistema restaurado al estado del ID {backup['backup_id']}")
             backup_data = backup['data']
             
-            # Limpiar datos actuales en memoria
+            # Limpiar datos en memoria
             self.charging_points.clear()
             self.drivers.clear()
             
-            # Restaurar puntos de carga
+            # Restaurar CPs
             for cp_data in backup_data.get('charging_points', []):
                 try:
                     cp = ChargingPoint.unparse(cp_data)
@@ -702,7 +702,7 @@ class DatabaseManager:
                 except Exception as e:
                     logger.error(f"❌ Error restaurando CP {cp_data.get('cp_id', 'desconocido')}: {e}")
             
-            # Restaurar conductores
+            # Restaurar Drivers
             for driver_id in backup_data.get('drivers', []):
                 self.drivers.add(driver_id)
                 cursor.execute("""
@@ -835,18 +835,18 @@ class RealKafkaManager:
             json_bytes = json.dumps(payload_a_cifrar).encode('utf-8')
             token_cifrado = cipher.encrypt(json_bytes)
 
-            # --- 3. Construir el Mensaje Final ---
+            # Mensaje Final 
             
             mensaje_kafka_cifrado = {
-                'cp_id': cp_id_visible,          # Campo visible (usado para la clave en la Central)
-                'type': 'ENCRYPTED_FERNET',      # Bandera
+                'cp_id': cp_id_visible, # Campo visible (usado para la clave en la Central)
+                'type': 'ENCRYPTED_FERNET', # Bandera
                 'content': token_cifrado.decode('utf-8') # El resto del mensaje cifrado
             }
             return mensaje_kafka_cifrado
 
         except Exception as e:
             print(f"❌ Error al cifrar mensaje: {e}")
-            return mensaje_completo # Retornar el mensaje original como fallback
+            return mensaje_completo # Devolver el mensaje original como fallback
 
     def descifrar_mensaje_completo(self, mensaje_kafka: dict):
 
@@ -863,40 +863,37 @@ class RealKafkaManager:
         content = mensaje_kafka.get('content')
         msg_type = mensaje_kafka.get('type')
 
-        # 1. Validaciones
+        # Validaciones
         if not cp_id or msg_type != 'ENCRYPTED_FERNET' or not content:
-            # Se puede retornar el mensaje original si no es de tipo cifrado para un fallback.
+            # Se puede devolver el mensaje original si no es cifrado
             return mensaje_kafka 
 
-        # 2. Obtener la Clave
+        # Obtener clave
         clave_secreta = self.get_new_secret_key(cp_id)
         if not clave_secreta:
             print(f"❌ Error: Clave no encontrada para el Engine ID: {cp_id}")
             return None
-        # --- 3. INICIALIZACIÓN Y DESCIFRADO (PASOS CORREGIDOS) ---
+        # INICIALIZACIÓN Y DESCIFRADO 
         try:
-            # a) Derivación de la clave a formato Fernet (como en cifrar_mensaje_completo)
+            # Derivación de la clave a formato Fernet 
             key_bytes = hashlib.sha256(clave_secreta.encode('utf-8')).digest()
             fernet_key = base64.urlsafe_b64encode(key_bytes)
-            cipher = Fernet(fernet_key) # ¡Inicialización correcta aquí!
+            cipher = Fernet(fernet_key)
             
-            # b) Descifrado del Payload (usando la variable local 'cipher')
-            # El campo 'content' está cifrado en Base64, lo codificamos a bytes para Fernet
+            # Descifrado del Payload
+            # Content está cifrado en Base64, lo codificamos a bytes para Fernet
             datos_bytes = cipher.decrypt(content.encode('utf-8')) 
             
-            # c) Convertir los bytes descifrados (que es el JSON original) a diccionario
+            # Convertir bytes descifrados (que es el JSON original) a diccionario
             payload_descifrado = json.loads(datos_bytes.decode('utf-8'))
 
         except Exception as e:
             print(f"❌ Error: Fallo en el descifrado (Clave incorrecta o token inválido): {e}")
             return None
 
-        # 4. Reconstruir el Mensaje Original Completo
-        # Como tu función de cifrado incluye todo el diccionario en el payload, solo hacemos un update:
+        # Reconstruir el mensaje original
         mensaje_original_completo = payload_descifrado.copy()
-        
-        # Si por alguna razón el 'cp_id' se excluyera del cifrado en el Engine, 
-        # se podría asegurar que esté presente así:
+
         # mensaje_original_completo['cp_id'] = cp_id
 
         return mensaje_original_completo
@@ -1101,11 +1098,10 @@ class SocketServer:
         if cp.status == "SUMINISTRANDO":
             logger.info(f"🔄 CP {cp_id} en SUMINISTRANDO - Finalizando suministro antes de eliminar")
             
-            # 1. Cambiar a PARADO para generar ticket automáticamente
+            # Cambiar a PARADO ticket 
             self.central.update_cp_status(cp_id, "DESCONECTADO")
             logger.info(f"🎫 Ticket generado para CP {cp_id}")
             
-            # Esperar un momento para que se procese el ticket
             time.sleep(0.5)
         
         del self.central.database.charging_points[cp_id]
@@ -1150,16 +1146,16 @@ class SocketServer:
         REGISTER_OK = f"REGISTER_OK#{new_secret_key}"
         
         if existing_cp:
-            # PERMITIR reconexión SOLO si DESCONECTADO
+            # Reconexión SOLO si DESCONECTADO
             if existing_cp.status == "DESCONECTADO" or existing_cp.status == "AVERIADO":
                 logger.info(f"🔄 CP {cp_id} reconectando - Estado anterior: DESCONECTADO")
                 
-                # Actualizar datos del CP existente
+                # Actualizar datos del CP
                 existing_cp.location = location
                 existing_cp.price_per_kwh = price
                 existing_cp.socket_connection = client_socket
                 existing_cp.last_heartbeat = datetime.now()
-                existing_cp.status = "ACTIVADO"  # ACTIVADO al reconectar
+                existing_cp.status = "ACTIVADO"
                 
                 if existing_cp.weather_alert_active:
                     existing_cp.status = "AVERIADO"
@@ -1177,13 +1173,13 @@ class SocketServer:
                 return
                 
             else:
-                # NO permitir reconexión si el CP CUALQUIER OTRO estado
+                # NO reconexión si el CP CUALQUIER OTRO estado
                 logger.warning(f"🚫 CP {cp_id} ya registrado - Estado actual: {existing_cp.status} - No se permite reconexión")
                 response = f"ERROR#CP_ya_registrado#{cp_id}#Estado:{existing_cp.status}"
                 client_socket.send(response.encode('utf-8'))
                 return
         
-        # Si no existe, crear nuevo CP
+        # Si no existe crear nuevo CP
         cp = ChargingPoint(cp_id, location, price)
         cp.socket_connection = client_socket
         cp.last_heartbeat = datetime.now()
@@ -1233,7 +1229,7 @@ class SocketServer:
                     #logger.info(f"🔄 CP {cp_id} reactivado - Estado cambiado a ACTIVADO")
                     status_changed = True
                 
-                # Enviar respuesta simple
+                # Enviar respuesta
                 response = "CP_OK_ACK"
                 client_socket.send(response.encode('utf-8'))
                 logger.debug(f"💓 Heartbeat recibido de {cp_id} - Confirmación enviada")
@@ -1974,8 +1970,7 @@ class EVCentral:
                 if source == 'api_weather':
                     cp.weather_alert_active = True
                     logger.warning(f"❄️ ALERTA RECIBIDA: Poniendo CP {cp_id} en AVERIADO. Razón: {reason}")
-                # Esto actualiza la variable en memoria Y la Base de Datos PostgreSQL
-                # Opcional: Si estaba cargando, forzar parada
+
                 if cp.status == "SUMINISTRANDO":
                     self.handle_charging_failure(cp_id, reason)
 
@@ -1989,10 +1984,8 @@ class EVCentral:
                     cp.weather_alert_active = False # Quitamos el bloqueo
                     self.update_cp_status(cp_id, "ACTIVADO", source_ip=real_ip)
                 else:
-                    # ¡OJO! Si hay alerta climática, IGNORAMOS al mecánico
                     if cp.weather_alert_active:
                         logger.warning(f"🛡️ BLOQUEO DE SEGURIDAD: Se ignoró orden RESUME manual en CP {cp_id} porque persiste la alerta climática.")
-                        # Opcional: Podrías enviar un mensaje de vuelta diciendo "Denegado por clima"
                     else:
                         logger.info(f"🔧 REPARACIÓN MANUAL: Poniendo CP {cp_id} en ACTIVADO")
                         self.update_cp_status(cp_id, "ACTIVADO", source_ip=real_ip)
@@ -2000,19 +1993,17 @@ class EVCentral:
             elif command == 'STOP':
                 logger.info(f"🛑 STOP Remoto recibido para CP {cp_id}")
                 
-                # Si estaba suministrando, cerramos la sesión formalmente
                 if cp.status == "SUMINISTRANDO":
                     logger.info(f"🛑 Cerrando sesión y generando tickets para CP {cp_id}...")
                     
-                    # 1. Registrar Transacción (Calcula totales y cierra sesión DB)
+                    # Registrar transacción 
                     transaction_data = self.record_transaction(cp, "COMPLETED")
                     
-                    # 2. Enviar Tickets (Al Driver y al Engine)
+                    # Enviar tickets (Al Driver y al Engine)
                     if transaction_data:
                         self.send_ticket(cp_id, transaction_data)
                         logger.info(f"🎫 Tickets enviados por parada remota en CP {cp_id}")
                     
-                    # 3. Cambiar estado a PARADO
                     self.update_cp_status(cp_id, "PARADO", source_ip=real_ip)
                     
                 # Si solo estaba activado, pasamos a parado directamente
@@ -2046,18 +2037,14 @@ class EVCentral:
                 if cp.status == "SUMINISTRANDO":
                     logger.info(f"🛑 Parada Manual: Cerrando sesión y generando tickets para CP {cp_id}")
                     
-                    # 1. Registrar Transacción (Esto pone a 0 los contadores del CP)
-                    # Usamos status "COMPLETED" ya que es una parada controlada, no un fallo técnico
+                    # Registrar transacción (pone a 0 los contadores del CP)
                     transaction_data = self.record_transaction(cp, "COMPLETED")
                     
-                    # 2. Enviar Tickets (Al Driver y al Engine)
+                    # Enviar Tickets (Al Driver y al Engine)
                     if transaction_data:
                         self.send_ticket(cp_id, transaction_data)
                         logger.info(f"🎫 Tickets enviados por parada manual en CP {cp_id}")
                     
-                    # 3. Cambiar estado a PARADO
-                    # Al haber llamado a record_transaction antes, el current_amount es 0.
-                    # Esto evita que update_cp_status genere un ticket duplicado.
                     self.update_cp_status(cp_id, "PARADO")
                     
                 # Si solo estaba activado, pasamos a parado directamente
@@ -2610,7 +2597,6 @@ def main():
     print("=" * 60)
     
     try:
-        # Ahora EVCentral no necesita el parámetro data_file
         central = EVCentral(socket_host, socket_port, kafka_servers)
         central.start()
         
