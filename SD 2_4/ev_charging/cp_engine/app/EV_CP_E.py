@@ -177,7 +177,7 @@ class EV_CP_E:
         # 1. Validaciones
         if not cp_id or msg_type != 'ENCRYPTED_FERNET' or not content:
             # Se puede retornar el mensaje original si no es de tipo cifrado para un fallback.
-            return None 
+            return mensaje_kafka
 
         if str(cp_id) != str(self.ID):
             print(f"⚠️ Advertencia: El mensaje no está destinado a este Engine (cp_id: {cp_id}).")
