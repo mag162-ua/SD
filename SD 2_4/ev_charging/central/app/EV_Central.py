@@ -1041,7 +1041,7 @@ class SocketServer:
         """Maneja conexiones de clientes"""
         #ip_addr = f"{address[0]}:{address[1]}"
         try:
-            logger.info(f"🔗 Conexión establecida desde {address}")
+            #logger.info(f"🔗 Conexión establecida desde {address}")
             #self.central.database.add_audit_log("SOCKET", "CONEXION_ENTRANTE", "Nuevo cliente conectado", ip_addr)
 
             while True:
@@ -1055,7 +1055,7 @@ class SocketServer:
             logger.error(f"❌ Error manejando cliente {address}: {e}", exc_info=True)
         finally:
             client_socket.close()
-            logger.info(f"🔌 Conexión cerrada con {address}")
+            #logger.info(f"🔌 Conexión cerrada con {address}")
     
     def process_message(self, message: str, client_socket):
         """Procesa mensajes recibidos por socket"""
@@ -1710,8 +1710,8 @@ class EVCentral:
             cp.supply_ending = False
             cp.last_supply_message = None
 
-        logger.info(f"🔍 CP: {cp_id}, Estado anterior: '{previous_status}', Nuevo estado: '{status}'")
-        logger.info(f"🔍 Consumo: {consumption}, Importe: {amount}, Driver: {driver_id}")
+        #logger.info(f"🔍 CP: {cp_id}, Estado anterior: '{previous_status}', Nuevo estado: '{status}'")
+        #logger.info(f"🔍 Consumo: {consumption}, Importe: {amount}, Driver: {driver_id}")
         
         # Verificar si realmente hay un cambio de estado
         if previous_status == status and status != "SUMINISTRANDO": ########
@@ -1743,7 +1743,7 @@ class EVCentral:
             cp.driver_id = None
         
         # ACTUALIZAR ESTADO
-        logger.info(f"🔍 Aplicando cambio de estado: '{previous_status}' -> '{status}'")
+        #logger.info(f"🔍 Aplicando cambio de estado: '{previous_status}' -> '{status}'")
         cp.status = status
         cp.current_consumption = consumption
         cp.current_amount = amount
@@ -1769,12 +1769,12 @@ class EVCentral:
             self.database.add_audit_log(
                 source=f"CP-{cp_id}",
                 action="CAMBIO_ESTADO",
-                details=f"Estado cambió de {previous_status} a {status}. Driver: {driver_id or 'N/A'}",
+                details=f"Estado cambió de {previous_status} a {status}.",
                 ip_address=source_ip or "N/A"
             )
 
         logger.info(f"✅ Estado actualizado - CP: {cp_id}, Estado: {cp.status}")
-        logger.info(f"🔍 DEBUG update_cp_status FIN - Estado verificado: '{cp.status}'")
+        #logger.info(f"🔍 DEBUG update_cp_status FIN - Estado verificado: '{cp.status}'")
         
     def record_transaction(self, cp: ChargingPoint, status: str):
         """Registra una transacción completada"""
