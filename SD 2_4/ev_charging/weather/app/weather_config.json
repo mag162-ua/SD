@@ -1,9 +1,15 @@
 {
     "api_key": "d77ed952764846a75a86e7ecf11df223",
     "locations": {
-        "1": "Oslo,NO",
-        "2": "Seville,ES",
-        "3": "Madrid,ES",
-        "4": "Dubai,AE"
+        "1": "Moscow,RU",
+        "2": "Oslo,NO",
+        "3": "Montreal,CA",
+        "4": "New York,US",
+        "5": "London,GB",
+        "6": "Tokyo,JP",
+        "7": "Madrid,ES",
+        "8": "Sydney,AU",
+        "9": "Rio de Janeiro,BR",
+        "10": "Mexico City,MX"
     }
 }
